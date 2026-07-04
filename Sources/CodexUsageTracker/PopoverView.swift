@@ -132,7 +132,7 @@ private struct UsageRow: View {
     let subtitle: String?
     let window: CodexRateWindow
 
-    private var displayPercentage: Double { window.usedPercent }
+    private var displayPercentage: Double { window.effectiveUsedPercent }
 
     private var statusColor: Color {
         switch window.status {
@@ -195,7 +195,7 @@ private struct UsageRow: View {
             .frame(height: 4)
 
             // Reset clock time (like Claude: "Resets Today 3:59am")
-            Text("Resets \(window.resetsAt.resetClockString())")
+            Text("Resets \(window.effectiveResetsAt.resetClockString())")
                 .font(.system(size: 9))
                 .foregroundColor(.secondary)
         }

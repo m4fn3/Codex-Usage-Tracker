@@ -102,11 +102,11 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         let image = MenuBarIconRenderer.ringsImage(
             [
                 // Left = Weekly (W), right = Session (S).
-                RingSpec(percent: usage.weekly.usedPercent,
+                RingSpec(percent: usage.weekly.effectiveUsedPercent,
                          status: usage.weekly.status,
                          elapsedFraction: usage.weekly.elapsedFraction,
                          label: nil),
-                RingSpec(percent: usage.session.usedPercent,
+                RingSpec(percent: usage.session.effectiveUsedPercent,
                          status: usage.session.status,
                          elapsedFraction: usage.session.elapsedFraction,
                          label: nil),
