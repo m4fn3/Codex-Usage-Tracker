@@ -56,7 +56,7 @@ enum MenuBarIconRenderer {
             let inset: CGFloat = 0.75
             let chipRect = NSRect(x: inset, y: inset, width: width - 2 * inset, height: height - 2 * inset)
             let chipPath = NSBezierPath(roundedRect: chipRect, xRadius: 6, yRadius: 6)
-            borderColor.withAlphaComponent(0.22).setFill()
+            borderColor.withAlphaComponent(0.16).setFill()
             chipPath.fill()
         }
 
