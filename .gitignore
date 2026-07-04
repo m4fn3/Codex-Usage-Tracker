@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager build artifacts
+/.build/
+.swiftpm/
+
+# Packaged app bundle produced by build-app.sh
+/build/
+
+# Xcode user state (if opened in Xcode)
+*.xcuserstate
+xcuserdata/
