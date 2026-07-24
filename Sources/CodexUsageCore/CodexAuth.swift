@@ -25,6 +25,7 @@ import Foundation
 public struct CodexAuth: Sendable, Equatable {
     public let accessToken: String
     public let refreshToken: String?
+    public let idToken: String?
     public let accountId: String?
     public let planType: String?
     public let email: String?
@@ -34,6 +35,7 @@ public struct CodexAuth: Sendable, Equatable {
     public init(
         accessToken: String,
         refreshToken: String?,
+        idToken: String? = nil,
         accountId: String?,
         planType: String?,
         email: String?,
@@ -41,6 +43,7 @@ public struct CodexAuth: Sendable, Equatable {
     ) {
         self.accessToken = accessToken
         self.refreshToken = refreshToken
+        self.idToken = idToken
         self.accountId = accountId
         self.planType = planType
         self.email = email
@@ -60,6 +63,43 @@ public struct CodexAuth: Sendable, Equatable {
         CodexUsageReader.codexHome.appendingPathComponent("auth.json")
     }
 
+    /// ISO-8601 with fractional seconds, matching the CLI's `last_refresh` format.
+    private static let lastRefreshFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    /// Writes the given tokens into ~/.codex/auth.json so the Codex CLI uses this
+    /// account. Written atomically and owner-only (0600), mirroring the shape the
+    /// CLI expects: `{ "tokens": {...}, "last_refresh": "<iso8601>" }`.
+    public static func writeActive(
+        idToken: String?,
+        accessToken: String,
+        refreshToken: String?,
+        accountId: String?,
+        now: Date = Date(),
+        to url: URL = authFileURL
+    ) throws {
+        var tokens: [String: Any] = ["access_token": accessToken]
+        if let idToken { tokens["id_token"] = idToken }
+        if let refreshToken { tokens["refresh_token"] = refreshToken }
+        if let accountId { tokens["account_id"] = accountId }
+
+        let root: [String: Any] = [
+            "tokens": tokens,
+            "last_refresh": lastRefreshFormatter.string(from: now),
+        ]
+
+        let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try data.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
     public static func load(from url: URL = authFileURL) -> CodexAuth? {
         guard let data = try? Data(contentsOf: url),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -68,14 +108,31 @@ public struct CodexAuth: Sendable, Equatable {
             return nil
         }
 
-        let accessClaims = decodeJWTClaims(accessToken)
-        let idClaims = tokens["id_token"].flatMap { $0 as? String }.flatMap(decodeJWTClaims)
-
-        return CodexAuth(
+        return from(
             accessToken: accessToken,
             refreshToken: tokens["refresh_token"] as? String,
-            accountId: (tokens["account_id"] as? String)
-                ?? authClaim(accessClaims, "chatgpt_account_id"),
+            idToken: tokens["id_token"] as? String,
+            accountIdFallback: tokens["account_id"] as? String
+        )
+    }
+
+    /// Builds an identity by decoding the JWT claims of the given tokens. Used both
+    /// when reading auth.json and after refreshing tokens.
+    public static func from(
+        accessToken: String,
+        refreshToken: String?,
+        idToken: String?,
+        accountIdFallback: String?
+    ) -> CodexAuth {
+        let accessClaims = decodeJWTClaims(accessToken)
+        let idClaims = idToken.flatMap(decodeJWTClaims)
+        return CodexAuth(
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+            idToken: idToken,
+            accountId: accountIdFallback
+                ?? authClaim(accessClaims, "chatgpt_account_id")
+                ?? authClaim(idClaims, "chatgpt_account_id"),
             planType: authClaim(accessClaims, "chatgpt_plan_type")
                 ?? authClaim(idClaims, "chatgpt_plan_type"),
             email: emailClaim(idClaims) ?? emailClaim(accessClaims),

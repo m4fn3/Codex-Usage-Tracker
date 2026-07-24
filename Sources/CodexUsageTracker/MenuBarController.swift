@@ -2,23 +2,24 @@
 //  MenuBarController.swift
 //  Codex Usage Tracker
 //
-//  Owns the NSStatusItem, refreshes usage on a timer, renders the ring, and
-//  shows the SwiftUI detail popover on click.
+//  Owns the NSStatusItem, refreshes usage on a timer, renders the ring for the
+//  ACTIVE account, and shows the SwiftUI account/detail popover on click.
 //
 
 import AppKit
 import SwiftUI
 import CodexUsageCore
 
+@MainActor
 final class MenuBarController: NSObject, NSPopoverDelegate {
 
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
-    private let store = UsageStore()
+    private let accounts = AccountsController()
     private var refreshTimer: Timer?
 
-    /// Menu-bar icon refresh cadence. The provider makes a network call for the
-    /// live account usage, so we poll gently.
+    /// Menu-bar icon refresh cadence. The provider makes a network call per account
+    /// for live usage, so we poll gently.
     private let refreshInterval: TimeInterval = 60
 
     /// Light-blue oval outline that brands the Codex icon (水色).
@@ -40,11 +41,14 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         popover.delegate = self
         popover.contentViewController = NSHostingController(
             rootView: PopoverView(
-                store: store,
+                accounts: accounts,
                 onRefresh: { [weak self] in self?.refresh() },
                 onQuit: { NSApp.terminate(nil) }
             )
         )
+
+        // Keep the menu-bar ring in sync when the popover switches accounts.
+        accounts.onStateChange = { [weak self] in self?.updateButton() }
 
         // Re-render the ring when the system theme flips (menu-bar text color changes).
         DistributedNotificationCenter.default.addObserver(
@@ -56,7 +60,8 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
 
         refresh()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
-            self?.refresh()
+            // Timer fires on the main run loop, so we're already on the main actor.
+            MainActor.assumeIsolated { self?.refresh() }
         }
     }
 
@@ -73,41 +78,33 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     }
 
     @objc private func themeChanged() {
-        DispatchQueue.main.async { [weak self] in self?.updateButton() }
+        updateButton()
     }
 
     // MARK: - Refresh
 
     func refresh() {
         Task { [weak self] in
-            let usage = await CodexUsageProvider.load()
-            await self?.apply(usage)
+            await self?.accounts.reload()
+            self?.updateButton()
         }
-    }
-
-    @MainActor
-    private func apply(_ usage: CodexUsage?) {
-        store.usage = usage
-        store.didLoad = true
-        updateButton()
     }
 
     private func updateButton() {
         guard let button = statusItem.button else { return }
-        // Two rings side by side (no letters, like Claude Usage Tracker):
+        // The menu bar shows only the ACTIVE account. Two rings side by side:
         // left = weekly (all models), right = session (5-hour window). Either
-        // window may be absent (free plan has no session window; a paid session
-        // window is missing until Codex reports one), so we render only the
-        // windows we actually have.
+        // window may be absent, so render only the windows we actually have.
         let now = Date()
+        let usage = accounts.activeUsage
         let specs: [RingSpec] = [
-            store.usage?.weekly.map { ringSpec(for: $0, now: now) },
-            store.usage?.session.map { ringSpec(for: $0, now: now) },
+            usage?.weekly.map { ringSpec(for: $0, now: now) },
+            usage?.session.map { ringSpec(for: $0, now: now) },
         ].compactMap { $0 }
 
         guard !specs.isEmpty else {
             button.image = nil
-            button.title = "—"   // no data yet
+            button.title = accounts.didLoad ? "—" : "…"
             return
         }
 

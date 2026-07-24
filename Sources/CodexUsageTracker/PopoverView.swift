@@ -2,64 +2,48 @@
 //  PopoverView.swift
 //  Codex Usage Tracker
 //
-//  The detail panel shown when the menu-bar icon is clicked. Mirrors the
-//  Claude Usage Tracker popover: flat bordered "UsageRow" cards with a title,
-//  optional tag, right-aligned percentage, a progress bar with an elapsed-time
-//  marker, and the reset clock time below.
-//   • Session — 5-hour window
-//   • All models — weekly window
+//  The panel shown when the menu-bar icon is clicked:
+//   • The active account at the top with its full Session / All-Models usage.
+//   • Other logged-in accounts below as compact rows (email + used% + reset),
+//     tap to switch.
+//   • Controls to add an account (official codex login), capture the current
+//     login, and force-close all Codex processes.
 //
 
 import SwiftUI
 import CodexUsageCore
 
 struct PopoverView: View {
-    @ObservedObject var store: UsageStore
+    @ObservedObject var accounts: AccountsController
     var onRefresh: () -> Void
     var onQuit: () -> Void
 
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             header
 
-            if let usage = store.usage, usage.hasAnyWindow {
-                if let session = usage.session {
-                    UsageRow(
-                        title: "Session Usage",
-                        subtitle: "5-hour window",
-                        window: session
-                    )
-                }
-                if let weekly = usage.weekly {
-                    UsageRow(
-                        title: "All Models",
-                        tag: Self.longWindowTag(minutes: weekly.windowMinutes),
-                        subtitle: nil,
-                        window: weekly
-                    )
-                }
-                footer(usage)
-            } else {
+            if !accounts.didLoad {
+                loadingState
+            } else if accounts.rows.isEmpty {
                 emptyState
-                footer(nil)
+            } else {
+                if let active = accounts.activeRow {
+                    activeAccount(active)
+                }
+                if !accounts.otherRows.isEmpty {
+                    otherAccountsSection
+                }
             }
+
+            controls
+            Divider().padding(.vertical, 1)
+            footer
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .frame(width: 300)
-    }
-
-    /// Human label for the long window, derived from its length: weekly (10080)
-    /// on paid plans, ~monthly (43200) on the free plan.
-    static func longWindowTag(minutes: Int) -> String {
-        switch minutes {
-        case 0:            return "Rolling"
-        case ..<8640:      return "Rolling"
-        case ..<20160:     return "Weekly"     // ~7 days
-        default:           return "Monthly"    // ~30 days (free plan)
-        }
+        .frame(width: 320)
     }
 
     // MARK: - Header
@@ -72,87 +56,253 @@ struct PopoverView: View {
             Text("Codex Usage")
                 .font(.system(size: 14, weight: .semibold))
             Spacer()
-            if let plan = store.usage?.planType, !plan.isEmpty {
-                Text(plan.uppercased())
-                    .font(.system(size: 10, weight: .bold))
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(Color.accentColor.opacity(0.18)))
-                    .foregroundStyle(Color.accentColor)
+            if let plan = accounts.activeRow?.account.planType, !plan.isEmpty {
+                planBadge(plan)
             }
         }
         .padding(.bottom, 2)
     }
 
-    // MARK: - Empty state
+    private func planBadge(_ plan: String) -> some View {
+        Text(plan.uppercased())
+            .font(.system(size: 10, weight: .bold))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(Color.accentColor.opacity(0.18)))
+            .foregroundStyle(Color.accentColor)
+    }
 
-    private var emptyState: some View {
+    // MARK: - Active account
+
+    private func activeAccount(_ row: AccountsController.Row) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(store.didLoad ? "No Codex usage data found" : "Loading…")
-                .font(.system(size: 13, weight: .medium))
-            if store.didLoad {
-                Text("Run Codex at least once so it records rate limits under ~/.codex/sessions.")
+            HStack(spacing: 6) {
+                Image(systemName: "person.crop.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Text(row.account.displayName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("現在")
+                    .font(.system(size: 9, weight: .bold))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.green.opacity(0.18)))
+                    .foregroundStyle(.green)
+                Spacer()
+            }
+
+            if let usage = row.usage, usage.hasAnyWindow {
+                if let session = usage.session {
+                    UsageRow(title: "Session Usage", subtitle: "5-hour window", window: session)
+                }
+                if let weekly = usage.weekly {
+                    UsageRow(title: "All Models",
+                             tag: Self.longWindowTag(minutes: weekly.windowMinutes),
+                             subtitle: nil,
+                             window: weekly)
+                }
+            } else {
+                Text("利用状況を取得できませんでした")
                     .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - Other accounts
+
+    private var otherAccountsSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("別のアカウント")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+            ForEach(accounts.otherRows) { row in
+                AccountSwitchRow(
+                    row: row,
+                    disabled: accounts.isBusy,
+                    onTap: { Task { await accounts.switchTo(row.id) } },
+                    onRemove: { Task { await accounts.remove(row.id) } }
+                )
+            }
+        }
+    }
+
+    // MARK: - Controls
+
+    private var controls: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                if accounts.loginInProgress {
+                    ProgressView().controlSize(.small)
+                    Button("キャンセル") { accounts.cancelAdd() }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 11))
+                } else {
+                    Button(action: { accounts.addAccount() }) {
+                        Label("アカウントを追加", systemImage: "plus.circle")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(accounts.isBusy)
+
+                    Button(action: { Task { await accounts.captureCurrent() } }) {
+                        Label("取り込む", systemImage: "arrow.down.circle")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(accounts.isBusy)
+                }
+                Spacer()
+            }
+
+            Button(action: { Task { await accounts.forceCloseAll() } }) {
+                Label("すべての Codex を閉じる", systemImage: "xmark.octagon")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
+            }
+            .buttonStyle(.borderless)
+            .disabled(accounts.isBusy)
+
+            if let message = accounts.statusMessage, !message.isEmpty {
+                Text(message)
+                    .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    // MARK: - Loading / empty
+
+    private var loadingState: some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.small)
+            Text("読み込み中…").font(.system(size: 12))
+        }
+        .padding(.vertical, 6)
+    }
+
+    private var emptyState: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("ログイン中の Codex アカウントが見つかりません")
+                .font(.system(size: 12, weight: .medium))
+            Text("『アカウントを追加』から codex login でログインしてください。")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.vertical, 4)
     }
 
     // MARK: - Footer
 
-    @ViewBuilder
-    private func footer(_ usage: CodexUsage?) -> some View {
-        VStack(spacing: 6) {
-            if let usage {
-                HStack(spacing: 5) {
-                    if let email = usage.accountEmail, !email.isEmpty {
-                        Image(systemName: "person.crop.circle")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.tertiary)
-                        Text(email)
-                            .font(.system(size: 9))
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    Spacer()
-                    Text(usage.source == .liveAPI ? "live" : "local")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                        .help(usage.source == .liveAPI
-                              ? "Live from the logged-in account"
-                              : "From local session files (API unavailable)")
-                    Text("· \(RelativeTime.string(from: usage.lastUpdated))")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            HStack(spacing: 10) {
-                Toggle("Start at login", isOn: $launchAtLogin)
-                    .toggleStyle(.checkbox)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .onChange(of: launchAtLogin) { newValue in
-                        LaunchAtLogin.setEnabled(newValue)
-                    }
-                Spacer()
-                Button(action: onRefresh) {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-                .help("Refresh")
-
-                Button(action: onQuit) {
-                    Text("Quit").font(.system(size: 11))
-                }
-                .buttonStyle(.borderless)
+    private var footer: some View {
+        HStack(spacing: 10) {
+            Toggle("Start at login", isOn: $launchAtLogin)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .help("Quit Codex Usage")
+                .onChange(of: launchAtLogin) { newValue in
+                    LaunchAtLogin.setEnabled(newValue)
+                }
+            Spacer()
+            Button(action: onRefresh) {
+                Image(systemName: "arrow.clockwise")
             }
+            .buttonStyle(.borderless)
+            .help("Refresh")
+
+            Button(action: onQuit) {
+                Text("Quit").font(.system(size: 11))
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("Quit Codex Usage")
         }
         .padding(.top, 2)
+    }
+
+    /// Human label for the long window, derived from its length: weekly (10080)
+    /// on paid plans, ~monthly (43200) on the free plan.
+    static func longWindowTag(minutes: Int) -> String {
+        switch minutes {
+        case 0:        return "Rolling"
+        case ..<8640:  return "Rolling"
+        case ..<20160: return "Weekly"     // ~7 days
+        default:       return "Monthly"    // ~30 days (free plan)
+        }
+    }
+}
+
+// MARK: - Compact switch row for other accounts
+
+private struct AccountSwitchRow: View {
+    let row: AccountsController.Row
+    let disabled: Bool
+    let onTap: () -> Void
+    let onRemove: () -> Void
+
+    private var headline: CodexRateWindow? { row.usage?.weekly ?? row.usage?.session }
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 6) {
+                Image(systemName: "person.crop.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text(row.account.displayName)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 6)
+                if let window = headline {
+                    Text("\(Int(window.effectiveUsedPercent().rounded()))%")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(color(for: window))
+                    if let reset = Self.resetCountdown(window) {
+                        Text(reset)
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                    }
+                } else {
+                    Text("—").font(.system(size: 11)).foregroundStyle(.tertiary)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.04)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .help("クリックでこのアカウントに切り替え")
+        .contextMenu {
+            Button(role: .destructive, action: onRemove) {
+                Label("このアカウントを削除", systemImage: "trash")
+            }
+        }
+    }
+
+    private func color(for window: CodexRateWindow) -> Color {
+        switch window.status() {
+        case .safe:     return .green
+        case .moderate: return .orange
+        case .critical: return .red
+        }
+    }
+
+    static func resetCountdown(_ window: CodexRateWindow, now: Date = Date()) -> String? {
+        guard let seconds = window.secondsUntilReset(now: now) else { return nil }
+        if seconds <= 0 { return "まもなく" }
+        let days = Int(seconds / 86400)
+        if days >= 1 { return "あと\(days)日" }
+        let hours = Int(seconds / 3600)
+        if hours >= 1 { return "あと\(hours)時間" }
+        return "あと\(max(1, Int(seconds / 60)))分"
     }
 }
 
@@ -176,14 +326,12 @@ private struct UsageRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            // Title row with percentage
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 5) {
                         Text(title)
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(.primary)
-
                         if let tag {
                             Text(tag)
                                 .font(.system(size: 9, weight: .medium))
@@ -199,15 +347,12 @@ private struct UsageRow: View {
                             .foregroundColor(.secondary)
                     }
                 }
-
                 Spacer()
-
                 Text("\(Int(displayPercentage.rounded()))%")
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundColor(statusColor)
             }
 
-            // Progress bar with elapsed-time marker
             GeometryReader { geometry in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 2.5)
@@ -227,7 +372,6 @@ private struct UsageRow: View {
             }
             .frame(height: 4)
 
-            // Reset clock time (like Claude: "Resets Today 3:59am")
             if let reset = window.effectiveResetsAt() {
                 Text("Resets \(reset.resetClockString())")
                     .font(.system(size: 9))
@@ -246,7 +390,6 @@ private struct UsageRow: View {
 // MARK: - Formatting helpers
 
 enum RelativeTime {
-    /// "just now", "5m ago", "2h ago", "3d ago".
     static func string(from date: Date) -> String {
         let seconds = -date.timeIntervalSinceNow
         if seconds < 60 { return "just now" }
