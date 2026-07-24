@@ -22,8 +22,6 @@ struct PopoverView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            header
-
             if !accounts.didLoad {
                 loadingState
             } else if accounts.rows.isEmpty {
@@ -33,10 +31,12 @@ struct PopoverView: View {
                     activeAccount(active)
                 }
                 if !accounts.otherRows.isEmpty {
+                    Divider().padding(.vertical, 1)
                     otherAccountsSection
                 }
             }
 
+            Divider().padding(.vertical, 1)
             controls
             Divider().padding(.vertical, 1)
             footer
@@ -44,20 +44,6 @@ struct PopoverView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .frame(width: 320)
-    }
-
-    // MARK: - Header
-
-    private var header: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "gauge.with.dots.needle.67percent")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.secondary)
-            Text("Codex Usage")
-                .font(.system(size: 14, weight: .semibold))
-            Spacer()
-        }
-        .padding(.bottom, 2)
     }
 
     // MARK: - Active account
