@@ -176,7 +176,7 @@ struct PopoverView: View {
             Button(action: { Task { await accounts.forceCloseAll() } }) {
                 Label("すべての Codex を閉じる（\(accounts.runningCodexCount)個）", systemImage: "xmark.octagon")
                     .font(.system(size: 11))
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.primary)
             }
             .buttonStyle(.borderless)
             .disabled(accounts.isBusy)
@@ -272,19 +272,20 @@ private struct PlanBadge: View {
 
     var body: some View {
         if let plan, !plan.isEmpty {
-            HStack(spacing: 3) {
+            HStack(spacing: 4) {
                 Text(plan.uppercased())
                     .font(.system(size: 9, weight: .bold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.accentColor.opacity(0.18)))
+                    .foregroundStyle(Color.accentColor)
+                // Days remaining as plain, high-contrast text (not tinted-on-tint).
                 if let days = daysLeft {
                     Text("あと\(days)日")
-                        .font(.system(size: 9, weight: .medium))
-                        .opacity(0.85)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.primary)
                 }
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(Color.accentColor.opacity(0.18)))
-            .foregroundStyle(Color.accentColor)
         }
     }
 }
