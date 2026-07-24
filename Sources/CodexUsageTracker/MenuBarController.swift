@@ -8,6 +8,7 @@
 
 import AppKit
 import SwiftUI
+import CodexUsageCore
 
 final class MenuBarController: NSObject, NSPopoverDelegate {
 
@@ -90,33 +91,40 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
 
     private func updateButton() {
         guard let button = statusItem.button else { return }
-        guard let usage = store.usage else {
+        // Two rings side by side (no letters, like Claude Usage Tracker):
+        // left = weekly (all models), right = session (5-hour window). Either
+        // window may be absent (free plan has no session window; a paid session
+        // window is missing until Codex reports one), so we render only the
+        // windows we actually have.
+        let now = Date()
+        let specs: [RingSpec] = [
+            store.usage?.weekly.map { ringSpec(for: $0, now: now) },
+            store.usage?.session.map { ringSpec(for: $0, now: now) },
+        ].compactMap { $0 }
+
+        guard !specs.isEmpty else {
             button.image = nil
             button.title = "—"   // no data yet
             return
         }
-        // Two rings side by side (no letters, like Claude Usage Tracker):
-        // left = session (5-hour window), right = weekly (all models).
-        // Each ring shows its percentage in the center, its status color, and
-        // an outer tick for how far its window has elapsed.
+
         let image = MenuBarIconRenderer.ringsImage(
-            [
-                // Left = Weekly (W), right = Session (S).
-                RingSpec(percent: usage.weekly.effectiveUsedPercent,
-                         status: usage.weekly.status,
-                         elapsedFraction: usage.weekly.elapsedFraction,
-                         label: nil),
-                RingSpec(percent: usage.session.effectiveUsedPercent,
-                         status: usage.session.status,
-                         elapsedFraction: usage.session.elapsedFraction,
-                         label: nil),
-            ],
+            specs,
             isDark: isDarkMenuBar,
             borderColor: Self.codexBorderColor
         )
         image.isTemplate = false   // rings use status colors, so not a template
         button.image = image
         button.title = ""
+    }
+
+    private func ringSpec(for window: CodexRateWindow, now: Date) -> RingSpec {
+        RingSpec(
+            percent: window.effectiveUsedPercent(now: now),
+            status: window.status(now: now),
+            elapsedFraction: window.elapsedFraction(now: now),
+            label: nil
+        )
     }
 
     // MARK: - Popover

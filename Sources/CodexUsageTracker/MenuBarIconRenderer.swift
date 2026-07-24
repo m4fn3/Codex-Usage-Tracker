@@ -12,6 +12,7 @@
 //
 
 import AppKit
+import CodexUsageCore
 
 /// One ring's inputs.
 struct RingSpec {

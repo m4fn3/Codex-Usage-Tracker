@@ -11,6 +11,7 @@
 //
 
 import SwiftUI
+import CodexUsageCore
 
 struct PopoverView: View {
     @ObservedObject var store: UsageStore
@@ -23,18 +24,22 @@ struct PopoverView: View {
         VStack(alignment: .leading, spacing: 6) {
             header
 
-            if let usage = store.usage {
-                UsageRow(
-                    title: "Session Usage",
-                    subtitle: "5-hour window",
-                    window: usage.session
-                )
-                UsageRow(
-                    title: "All Models",
-                    tag: "Weekly",
-                    subtitle: nil,
-                    window: usage.weekly
-                )
+            if let usage = store.usage, usage.hasAnyWindow {
+                if let session = usage.session {
+                    UsageRow(
+                        title: "Session Usage",
+                        subtitle: "5-hour window",
+                        window: session
+                    )
+                }
+                if let weekly = usage.weekly {
+                    UsageRow(
+                        title: "All Models",
+                        tag: Self.longWindowTag(minutes: weekly.windowMinutes),
+                        subtitle: nil,
+                        window: weekly
+                    )
+                }
                 footer(usage)
             } else {
                 emptyState
@@ -44,6 +49,17 @@ struct PopoverView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .frame(width: 300)
+    }
+
+    /// Human label for the long window, derived from its length: weekly (10080)
+    /// on paid plans, ~monthly (43200) on the free plan.
+    static func longWindowTag(minutes: Int) -> String {
+        switch minutes {
+        case 0:            return "Rolling"
+        case ..<8640:      return "Rolling"
+        case ..<20160:     return "Weekly"     // ~7 days
+        default:           return "Monthly"    // ~30 days (free plan)
+        }
     }
 
     // MARK: - Header
@@ -132,10 +148,10 @@ private struct UsageRow: View {
     let subtitle: String?
     let window: CodexRateWindow
 
-    private var displayPercentage: Double { window.effectiveUsedPercent }
+    private var displayPercentage: Double { window.effectiveUsedPercent() }
 
     private var statusColor: Color {
-        switch window.status {
+        switch window.status() {
         case .safe:     return .green
         case .moderate: return .orange
         case .critical: return .red
@@ -185,19 +201,22 @@ private struct UsageRow: View {
                         .frame(width: geometry.size.width * min(displayPercentage / 100.0, 1.0))
                 }
                 .overlay(alignment: .leading) {
-                    let fraction = window.elapsedFraction
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(Color(nsColor: .labelColor))
-                        .frame(width: 2.5, height: 8)
-                        .offset(x: round(geometry.size.width * fraction) - 0.75)
+                    if let fraction = window.elapsedFraction() {
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(Color(nsColor: .labelColor))
+                            .frame(width: 2.5, height: 8)
+                            .offset(x: round(geometry.size.width * fraction) - 0.75)
+                    }
                 }
             }
             .frame(height: 4)
 
             // Reset clock time (like Claude: "Resets Today 3:59am")
-            Text("Resets \(window.effectiveResetsAt.resetClockString())")
-                .font(.system(size: 9))
-                .foregroundColor(.secondary)
+            if let reset = window.effectiveResetsAt() {
+                Text("Resets \(reset.resetClockString())")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)

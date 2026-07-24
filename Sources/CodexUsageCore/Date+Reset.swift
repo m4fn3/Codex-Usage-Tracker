@@ -10,7 +10,7 @@
 import Foundation
 
 extension Date {
-    func resetClockString(timezone: TimeZone = .current) -> String {
+    public func resetClockString(timezone: TimeZone = .current) -> String {
         let calendar = Calendar.current
         let formatter = DateFormatter()
         formatter.timeZone = timezone

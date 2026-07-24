@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import CodexUsageCore
 
 final class UsageStore: ObservableObject {
     @Published var usage: CodexUsage?
