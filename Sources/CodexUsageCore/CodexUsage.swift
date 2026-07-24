@@ -134,17 +134,36 @@ public struct CodexUsage: Sendable, Equatable {
     public var planType: String?
     /// Timestamp of the freshest record this snapshot was resolved from.
     public var lastUpdated: Date
+    /// ChatGPT account id this snapshot belongs to (the account-switch key). nil
+    /// when resolved purely from local files with no auth context.
+    public var accountId: String?
+    /// Email of the account, for display so the user can confirm which account.
+    public var accountEmail: String?
+    /// Where the snapshot came from — the live API (current account, authoritative)
+    /// or the local rollout files (best-effort).
+    public var source: Source
+
+    public enum Source: Sendable, Equatable {
+        case liveAPI
+        case localFiles
+    }
 
     public init(
         session: CodexRateWindow?,
         weekly: CodexRateWindow?,
         planType: String?,
-        lastUpdated: Date
+        lastUpdated: Date,
+        accountId: String? = nil,
+        accountEmail: String? = nil,
+        source: Source = .localFiles
     ) {
         self.session = session
         self.weekly = weekly
         self.planType = planType
         self.lastUpdated = lastUpdated
+        self.accountId = accountId
+        self.accountEmail = accountEmail
+        self.source = source
     }
 
     /// True when we resolved at least one usable window.

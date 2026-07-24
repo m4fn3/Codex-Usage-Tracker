@@ -17,8 +17,9 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     private let store = UsageStore()
     private var refreshTimer: Timer?
 
-    /// Menu-bar icon refresh cadence.
-    private let refreshInterval: TimeInterval = 30
+    /// Menu-bar icon refresh cadence. The provider makes a network call for the
+    /// live account usage, so we poll gently.
+    private let refreshInterval: TimeInterval = 60
 
     /// Light-blue oval outline that brands the Codex icon (水色).
     static let codexBorderColor = NSColor(srgbRed: 0.31, green: 0.76, blue: 0.97, alpha: 1.0)
@@ -78,15 +79,17 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     // MARK: - Refresh
 
     func refresh() {
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let usage = CodexUsageReader.loadLatest()
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.store.usage = usage
-                self.store.didLoad = true
-                self.updateButton()
-            }
+        Task { [weak self] in
+            let usage = await CodexUsageProvider.load()
+            await self?.apply(usage)
         }
+    }
+
+    @MainActor
+    private func apply(_ usage: CodexUsage?) {
+        store.usage = usage
+        store.didLoad = true
+        updateButton()
     }
 
     private func updateButton() {

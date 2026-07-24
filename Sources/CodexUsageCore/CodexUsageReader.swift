@@ -50,13 +50,22 @@ public enum CodexUsageReader {
 
     /// Loads the freshest usage snapshot, scanning the `maxFiles` most recently
     /// modified rollout files. Returns nil when no rate-limit data exists yet.
-    public static func loadLatest(maxFiles: Int = 40, now: Date = Date()) -> CodexUsage? {
+    ///
+    /// `preferredPlan` scopes resolution to a specific plan (e.g. the plan of the
+    /// account currently logged in per auth.json). This is what keeps a stale,
+    /// freshly-modified session from a *different* account (a different plan) from
+    /// hijacking the reading. Without it, the newest observation's plan wins.
+    public static func loadLatest(
+        maxFiles: Int = 40,
+        preferredPlan: String? = nil,
+        now: Date = Date()
+    ) -> CodexUsage? {
         var observations: [RateObservation] = []
         for url in recentRolloutFiles(limit: maxFiles) {
             guard let content = try? String(contentsOf: url, encoding: .utf8) else { continue }
             observations.append(contentsOf: fileObservations(fromContent: content))
         }
-        return resolve(observations: observations, now: now)
+        return resolve(observations: observations, preferredPlan: preferredPlan, now: now)
     }
 
     // MARK: - File discovery
@@ -102,25 +111,33 @@ public enum CodexUsageReader {
 
     /// Resolves the raw observations into a snapshot: the freshest state of each
     /// window role, with false-restore protection.
-    static func resolve(observations: [RateObservation], now: Date) -> CodexUsage? {
-        // Plan + "last updated" come from the newest observation overall.
-        let newest = observations.max { $0.timestamp < $1.timestamp }
-        let plan = newest?.planType
-
-        // Scope to the current plan so a stale account of a different plan can't
-        // pollute a role — e.g. a free 30-day window and a paid weekly window both
-        // classify as `.weekly`, but only the current plan's should be shown.
+    static func resolve(
+        observations: [RateObservation],
+        preferredPlan: String? = nil,
+        now: Date
+    ) -> CodexUsage? {
+        // Prefer the caller's plan (the logged-in account's), else fall back to the
+        // newest observation's plan. Scoping to one plan stops a stale account of a
+        // different plan from polluting a role — e.g. a free 30-day window and a
+        // paid weekly window both classify as `.weekly`.
+        let newestOverall = observations.max { $0.timestamp < $1.timestamp }
+        let plan = preferredPlan ?? newestOverall?.planType
         let scoped = plan == nil ? observations : observations.filter { $0.planType == plan }
 
         let session = resolveWindow(scoped.filter { $0.role == .session })
         let weekly = resolveWindow(scoped.filter { $0.role == .weekly })
         guard session != nil || weekly != nil else { return nil }
 
+        // "Last updated" is the newest observation within the resolved plan.
+        let lastUpdated = scoped.max { $0.timestamp < $1.timestamp }?.timestamp
+            ?? newestOverall?.timestamp ?? now
+
         return CodexUsage(
             session: session,
             weekly: weekly,
             planType: plan,
-            lastUpdated: newest?.timestamp ?? now
+            lastUpdated: lastUpdated,
+            source: .localFiles
         )
     }
 

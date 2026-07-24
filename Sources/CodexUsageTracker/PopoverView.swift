@@ -106,11 +106,27 @@ struct PopoverView: View {
     private func footer(_ usage: CodexUsage?) -> some View {
         VStack(spacing: 6) {
             if let usage {
-                HStack {
-                    Text("Updated \(RelativeTime.string(from: usage.lastUpdated))")
+                HStack(spacing: 5) {
+                    if let email = usage.accountEmail, !email.isEmpty {
+                        Image(systemName: "person.crop.circle")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                        Text(email)
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer()
+                    Text(usage.source == .liveAPI ? "live" : "local")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .help(usage.source == .liveAPI
+                              ? "Live from the logged-in account"
+                              : "From local session files (API unavailable)")
+                    Text("· \(RelativeTime.string(from: usage.lastUpdated))")
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
-                    Spacer()
                 }
             }
             HStack(spacing: 10) {
