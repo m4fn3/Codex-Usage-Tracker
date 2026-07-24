@@ -56,20 +56,8 @@ struct PopoverView: View {
             Text("Codex Usage")
                 .font(.system(size: 14, weight: .semibold))
             Spacer()
-            if let plan = accounts.activeRow?.account.planType, !plan.isEmpty {
-                planBadge(plan)
-            }
         }
         .padding(.bottom, 2)
-    }
-
-    private func planBadge(_ plan: String) -> some View {
-        Text(plan.uppercased())
-            .font(.system(size: 10, weight: .bold))
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(Capsule().fill(Color.accentColor.opacity(0.18)))
-            .foregroundStyle(Color.accentColor)
     }
 
     // MARK: - Active account
@@ -84,6 +72,7 @@ struct PopoverView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .lineLimit(1)
                     .truncationMode(.middle)
+                PlanBadge(plan: row.account.planType, subscriptionEndsAt: row.account.subscriptionEndsAt)
                 Text("現在")
                     .font(.system(size: 9, weight: .bold))
                     .padding(.horizontal, 5)
@@ -185,7 +174,7 @@ struct PopoverView: View {
             }
 
             Button(action: { Task { await accounts.forceCloseAll() } }) {
-                Label("すべての Codex を閉じる", systemImage: "xmark.octagon")
+                Label("すべての Codex を閉じる（\(accounts.runningCodexCount)個）", systemImage: "xmark.octagon")
                     .font(.system(size: 11))
                     .foregroundStyle(.red)
             }
@@ -263,6 +252,43 @@ struct PopoverView: View {
     }
 }
 
+// MARK: - Plan badge (plan name + paid-plan days remaining)
+
+private struct PlanBadge: View {
+    let plan: String?
+    let subscriptionEndsAt: Date?
+
+    private var isPaid: Bool {
+        guard let plan = plan?.lowercased(), !plan.isEmpty else { return false }
+        return !["free", "guest"].contains(plan)
+    }
+
+    private var daysLeft: Int? {
+        guard isPaid, let end = subscriptionEndsAt else { return nil }
+        let seconds = end.timeIntervalSinceNow
+        guard seconds > 0 else { return nil }
+        return max(1, Int(ceil(seconds / 86_400)))
+    }
+
+    var body: some View {
+        if let plan, !plan.isEmpty {
+            HStack(spacing: 3) {
+                Text(plan.uppercased())
+                    .font(.system(size: 9, weight: .bold))
+                if let days = daysLeft {
+                    Text("あと\(days)日")
+                        .font(.system(size: 9, weight: .medium))
+                        .opacity(0.85)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Color.accentColor.opacity(0.18)))
+            .foregroundStyle(Color.accentColor)
+        }
+    }
+}
+
 // MARK: - Compact switch row for other accounts
 
 private struct AccountSwitchRow: View {
@@ -275,41 +301,67 @@ private struct AccountSwitchRow: View {
 
     var body: some View {
         Button(action: onTap) {
-            HStack(spacing: 6) {
-                Image(systemName: "person.crop.circle")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                Text(row.account.displayName)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 6)
-                if row.needsReauth {
-                    Text("要再ログイン")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.orange)
-                } else if let window = headline {
-                    Text("\(Int(window.effectiveUsedPercent().rounded()))%")
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .foregroundStyle(color(for: window))
-                    if let reset = Self.resetCountdown(window) {
-                        Text(reset)
-                            .font(.system(size: 9))
-                            .foregroundStyle(.tertiary)
+            VStack(alignment: .leading, spacing: 5) {
+                // Address + headline percentage.
+                HStack(spacing: 6) {
+                    Image(systemName: "person.crop.circle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Text(row.account.displayName)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    PlanBadge(plan: row.account.planType, subscriptionEndsAt: row.account.subscriptionEndsAt)
+                    Spacer(minLength: 6)
+                    if row.needsReauth {
+                        Text("要再ログイン")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.orange)
+                    } else if let window = headline {
+                        Text("\(Int(window.effectiveUsedPercent().rounded()))%")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .foregroundStyle(color(for: window))
                     }
-                } else {
-                    Text("—").font(.system(size: 11)).foregroundStyle(.tertiary)
+                }
+
+                // Progress bar under the address (compact version of the active card).
+                if !row.needsReauth, let window = headline {
+                    let percent = window.effectiveUsedPercent()
+                    GeometryReader { geometry in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(Color.primary.opacity(0.08))
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(color(for: window))
+                                .frame(width: geometry.size.width * min(percent / 100.0, 1.0))
+                        }
+                        .overlay(alignment: .leading) {
+                            if let fraction = window.elapsedFraction() {
+                                RoundedRectangle(cornerRadius: 1)
+                                    .fill(Color(nsColor: .labelColor))
+                                    .frame(width: 2, height: 7)
+                                    .offset(x: round(geometry.size.width * fraction) - 0.5)
+                            }
+                        }
+                    }
+                    .frame(height: 4)
+
+                    if let reset = window.effectiveResetsAt() {
+                        Text("Resets \(reset.resetClockString())")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.04)))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(disabled)
-        .help("クリックでこのアカウントに切り替え")
+        .help(row.needsReauth ? "クリックで再ログイン" : "クリックでこのアカウントに切り替え")
         .contextMenu {
             Button(role: .destructive, action: onRemove) {
                 Label("このアカウントを削除", systemImage: "trash")
@@ -323,16 +375,6 @@ private struct AccountSwitchRow: View {
         case .moderate: return .orange
         case .critical: return .red
         }
-    }
-
-    static func resetCountdown(_ window: CodexRateWindow, now: Date = Date()) -> String? {
-        guard let seconds = window.secondsUntilReset(now: now) else { return nil }
-        if seconds <= 0 { return "まもなく" }
-        let days = Int(seconds / 86400)
-        if days >= 1 { return "あと\(days)日" }
-        let hours = Int(seconds / 3600)
-        if hours >= 1 { return "あと\(hours)時間" }
-        return "あと\(max(1, Int(seconds / 60)))分"
     }
 }
 

@@ -21,6 +21,8 @@ public struct CodexAccount: Codable, Sendable, Equatable, Identifiable {
     public var accessToken: String
     public var refreshToken: String?
     public var accessTokenExpiry: Date?
+    /// When the paid subscription lapses, if known (for the "N days left" display).
+    public var subscriptionEndsAt: Date?
 
     /// Optional user-set label; falls back to email / id for display.
     public var label: String?
@@ -35,6 +37,7 @@ public struct CodexAccount: Codable, Sendable, Equatable, Identifiable {
         accessToken: String,
         refreshToken: String?,
         accessTokenExpiry: Date?,
+        subscriptionEndsAt: Date? = nil,
         label: String? = nil,
         addedAt: Date,
         lastUsedAt: Date? = nil
@@ -46,6 +49,7 @@ public struct CodexAccount: Codable, Sendable, Equatable, Identifiable {
         self.accessToken = accessToken
         self.refreshToken = refreshToken
         self.accessTokenExpiry = accessTokenExpiry
+        self.subscriptionEndsAt = subscriptionEndsAt
         self.label = label
         self.addedAt = addedAt
         self.lastUsedAt = lastUsedAt
@@ -84,6 +88,7 @@ public struct CodexAccount: Codable, Sendable, Equatable, Identifiable {
             accessToken: auth.accessToken,
             refreshToken: auth.refreshToken,
             accessTokenExpiry: auth.accessTokenExpiry,
+            subscriptionEndsAt: auth.subscriptionEndsAt,
             label: label,
             addedAt: now,
             lastUsedAt: nil
@@ -100,6 +105,7 @@ public struct CodexAccount: Codable, Sendable, Equatable, Identifiable {
         copy.accessTokenExpiry = auth.accessTokenExpiry
         if let email = auth.email { copy.email = email }
         if let plan = auth.planType { copy.planType = plan }
+        if let ends = auth.subscriptionEndsAt { copy.subscriptionEndsAt = ends }
         return copy
     }
 }

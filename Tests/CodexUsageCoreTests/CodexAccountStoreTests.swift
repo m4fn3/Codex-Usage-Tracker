@@ -102,10 +102,16 @@ struct CodexAccountCredentialTests {
 }
 
 struct CodexProcessMatchTests {
-    @Test func `matches the codex CLI but never this app or the switcher`() {
+    @Test func `matches the codex CLI binary exactly, not lookalikes`() {
         #expect(CodexProcessKiller.isCodexCommand("/opt/homebrew/bin/codex") == true)
         #expect(CodexProcessKiller.isCodexCommand("codex exec --model gpt-5") == true)
-        #expect(CodexProcessKiller.isCodexCommand("/usr/local/bin/codex-tui") == true)
+        #expect(CodexProcessKiller.isCodexCommand("/Applications/ChatGPT.app/Contents/Resources/codex app-server") == true)
+
+        // ChatGPT.app's "Codex Framework" helper (capital C, no /codex suffix).
+        #expect(CodexProcessKiller.isCodexCommand(
+            "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/1/Codex Framework") == false)
+        // Vendored / helper binaries that merely start with codex-.
+        #expect(CodexProcessKiller.isCodexCommand("/usr/local/bin/codex-tui") == false)
         // Our own app must never be matched.
         #expect(CodexProcessKiller.isCodexCommand(
             "/Applications/Codex Usage.app/Contents/MacOS/CodexUsageTracker") == false)

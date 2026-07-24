@@ -28,6 +28,8 @@ final class AccountsController: ObservableObject {
     @Published private(set) var didLoad = false
     @Published private(set) var isBusy = false
     @Published private(set) var loginInProgress = false
+    /// Number of running Codex CLI processes (shown on the "close all" button).
+    @Published private(set) var runningCodexCount = 0
     @Published var statusMessage: String?
 
     /// Called after a reload changes the account rows so the menu-bar ring (owned
@@ -92,6 +94,9 @@ final class AccountsController: ObservableObject {
         }
         didLoad = true
         onStateChange?()
+
+        // Refresh the running-Codex count (ps runs off the main actor).
+        runningCodexCount = await Task.detached { CodexProcessKiller.findCodexPIDs().count }.value
     }
 
     // MARK: - Switch
@@ -190,5 +195,6 @@ final class AccountsController: ObservableObject {
         } else {
             statusMessage = "\(outcome.count) 件終了（\(outcome.survived.count) 件は終了できず）"
         }
+        runningCodexCount = await Task.detached { CodexProcessKiller.findCodexPIDs().count }.value
     }
 }

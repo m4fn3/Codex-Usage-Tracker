@@ -31,6 +31,8 @@ public struct CodexAuth: Sendable, Equatable {
     public let email: String?
     /// Expiry of `accessToken` (from its `exp` claim), or nil if undecodable.
     public let accessTokenExpiry: Date?
+    /// When the paid subscription lapses (`chatgpt_subscription_active_until`), if known.
+    public let subscriptionEndsAt: Date?
 
     public init(
         accessToken: String,
@@ -39,7 +41,8 @@ public struct CodexAuth: Sendable, Equatable {
         accountId: String?,
         planType: String?,
         email: String?,
-        accessTokenExpiry: Date?
+        accessTokenExpiry: Date?,
+        subscriptionEndsAt: Date? = nil
     ) {
         self.accessToken = accessToken
         self.refreshToken = refreshToken
@@ -48,6 +51,7 @@ public struct CodexAuth: Sendable, Equatable {
         self.planType = planType
         self.email = email
         self.accessTokenExpiry = accessTokenExpiry
+        self.subscriptionEndsAt = subscriptionEndsAt
     }
 
     /// True when the access token has not yet expired (with a small safety skew).
@@ -137,8 +141,27 @@ public struct CodexAuth: Sendable, Equatable {
                 ?? authClaim(idClaims, "chatgpt_plan_type"),
             email: emailClaim(idClaims) ?? emailClaim(accessClaims),
             accessTokenExpiry: (accessClaims?["exp"] as? NSNumber)
-                .map { Date(timeIntervalSince1970: $0.doubleValue) }
+                .map { Date(timeIntervalSince1970: $0.doubleValue) },
+            subscriptionEndsAt: parseClaimDate(
+                authClaim(idClaims, "chatgpt_subscription_active_until")
+                    ?? authClaim(accessClaims, "chatgpt_subscription_active_until"))
         )
+    }
+
+    private static let claimDateFormatters: [ISO8601DateFormatter] = {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return [plain, withFraction]
+    }()
+
+    private static func parseClaimDate(_ string: String?) -> Date? {
+        guard let string, !string.isEmpty else { return nil }
+        for formatter in claimDateFormatters {
+            if let date = formatter.date(from: string) { return date }
+        }
+        return nil
     }
 
     // MARK: - JWT

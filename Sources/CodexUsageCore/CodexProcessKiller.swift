@@ -37,18 +37,19 @@ public enum CodexProcessKiller {
     }
 
     /// Decides whether a `ps` command line belongs to the Codex CLI.
+    ///
+    /// Matches the `codex` binary exactly, CASE-SENSITIVELY, like Codex Switcher:
+    /// the executable (first whitespace token) is `codex` or ends with `/codex`.
+    /// Case sensitivity + the exact suffix keep us from matching ChatGPT.app's
+    /// "Codex Framework" helpers, `codex-*` vendored binaries, or this app.
     static func isCodexCommand(_ command: String) -> Bool {
         let lower = command.lowercased()
-        // Never match ourselves or the Rust switcher.
         if lower.contains("codexusagetracker") || lower.contains("codex usage") { return false }
         if lower.contains("codex-switcher") { return false }
 
-        guard let executable = command.split(separator: " ").first else { return false }
-        let base = (String(executable) as NSString).lastPathComponent.lowercased()
-        if base == "codex" { return true }
-        // Helper binaries like codex-tui / codex-exec, but not the switcher.
-        if base.hasPrefix("codex-") { return true }
-        return false
+        guard let executable = command.split(separator: " ", maxSplits: 1).first else { return false }
+        let token = String(executable)
+        return token == "codex" || token.hasSuffix("/codex")
     }
 
     /// Sends SIGTERM, then SIGKILL to any survivors. Returns what happened.
