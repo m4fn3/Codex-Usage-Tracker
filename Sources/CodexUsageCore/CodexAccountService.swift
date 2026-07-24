@@ -17,6 +17,11 @@ public enum CodexAccountError: Error, Sendable {
     case loginFailed
     case timedOut
     case noAccount
+    /// The account's tokens are revoked/invalidated server-side — it must be
+    /// re-logged-in with `codex login` (refresh can't recover it).
+    case needsReauth
+    /// A transient network failure; the current login was left untouched.
+    case network
 }
 
 public enum CodexAccountService {
@@ -44,42 +49,108 @@ public enum CodexAccountService {
 
     // MARK: - Usage
 
-    /// Fetches an account's usage, refreshing its access token first when it's
-    /// expired/near expiry. Returns the usage plus the (possibly refreshed) account
-    /// so the caller can persist new credentials.
+    public struct UsageOutcome: Sendable {
+        public var usage: CodexUsage?
+        public var account: CodexAccount
+        /// Set when the account's tokens are revoked/invalidated and a re-login is
+        /// required (refresh could not recover them).
+        public var needsReauth: Bool
+    }
+
+    /// Fetches an account's usage. Refreshes proactively when the token is expired,
+    /// and reactively on a 401 (tokens can be revoked before their JWT expiry, e.g.
+    /// after a refresh-token rotation). Returns the (possibly refreshed) account so
+    /// the caller can persist new credentials, and a `needsReauth` flag when the
+    /// session is dead.
     public static func usage(
         for account: CodexAccount,
         now: Date = Date(),
         session: URLSession = .shared
-    ) async -> (usage: CodexUsage?, account: CodexAccount) {
+    ) async -> UsageOutcome {
         var account = account
+
+        // Proactive refresh when the JWT is already expired.
         if !account.auth.isAccessTokenValid(now: now) {
-            if let fresh = try? await CodexTokenRefresher.refresh(account: account, now: now, session: session) {
-                account = account.updatingCredentials(from: fresh)
+            switch await tryRefresh(account, now: now, session: session) {
+            case .refreshed(let updated): account = updated
+            case .invalidated: return UsageOutcome(usage: nil, account: account, needsReauth: true)
+            case .transient: return UsageOutcome(usage: nil, account: account, needsReauth: false)
             }
         }
-        let usage = try? await CodexUsageAPI.fetch(auth: account.auth, now: now, session: session)
-        return (usage, account)
+
+        do {
+            let usage = try await CodexUsageAPI.fetch(auth: account.auth, now: now, session: session)
+            return UsageOutcome(usage: usage, account: account, needsReauth: false)
+        } catch CodexUsageAPIError.unauthorized {
+            // Revoked despite a valid-looking expiry — try one refresh + retry.
+            switch await tryRefresh(account, now: now, session: session) {
+            case .refreshed(let updated):
+                account = updated
+                if let usage = try? await CodexUsageAPI.fetch(auth: account.auth, now: now, session: session) {
+                    return UsageOutcome(usage: usage, account: account, needsReauth: false)
+                }
+                return UsageOutcome(usage: nil, account: account, needsReauth: true)
+            case .invalidated:
+                return UsageOutcome(usage: nil, account: account, needsReauth: true)
+            case .transient:
+                return UsageOutcome(usage: nil, account: account, needsReauth: false)
+            }
+        } catch {
+            // Network / parse — not a re-auth situation.
+            return UsageOutcome(usage: nil, account: account, needsReauth: false)
+        }
+    }
+
+    private enum RefreshResult {
+        case refreshed(CodexAccount)
+        case invalidated   // refresh_token dead → re-login required
+        case transient     // network etc.
+    }
+
+    private static func tryRefresh(
+        _ account: CodexAccount,
+        now: Date,
+        session: URLSession
+    ) async -> RefreshResult {
+        guard account.refreshToken?.isEmpty == false else { return .invalidated }
+        do {
+            let fresh = try await CodexTokenRefresher.refresh(account: account, now: now, session: session)
+            return .refreshed(account.updatingCredentials(from: fresh))
+        } catch CodexTokenRefreshError.http(let code) where code == 400 || code == 401 || code == 403 {
+            return .invalidated
+        } catch CodexTokenRefreshError.missingRefreshToken {
+            return .invalidated
+        } catch {
+            return .transient
+        }
     }
 
     // MARK: - Switch
 
-    /// Makes `account` the active CLI login by writing its (freshened) tokens to
-    /// ~/.codex/auth.json. Returns the account with refreshed credentials and an
-    /// updated `lastUsedAt` for the caller to persist.
+    /// Makes `account` the active CLI login by writing FRESH tokens to
+    /// ~/.codex/auth.json. Critically, we refresh first and only write tokens we
+    /// just minted — never the stored copy, which may already be a rotated-away
+    /// (invalidated) refresh token. Writing a stale token would break the CLI login
+    /// (`token_revoked` / `refresh_token_invalidated`).
+    ///
+    /// Throws `.needsReauth` when the account's refresh token is dead (re-login
+    /// required) and `.network` on a transient failure — in both cases auth.json is
+    /// left untouched.
     public static func switchTo(
         _ account: CodexAccount,
         now: Date = Date(),
         session: URLSession = .shared
     ) async throws -> CodexAccount {
         var account = account
-        // Best-effort refresh so the CLI receives a valid token; a network failure
-        // shouldn't block switching (the stored refresh token still works later).
-        if !account.auth.isAccessTokenValid(now: now) {
-            if let fresh = try? await CodexTokenRefresher.refresh(account: account, now: now, session: session) {
-                account = account.updatingCredentials(from: fresh)
-            }
+        switch await tryRefresh(account, now: now, session: session) {
+        case .refreshed(let updated):
+            account = updated
+        case .invalidated:
+            throw CodexAccountError.needsReauth
+        case .transient:
+            throw CodexAccountError.network
         }
+
         try CodexAuth.writeActive(
             idToken: account.idToken,
             accessToken: account.accessToken,

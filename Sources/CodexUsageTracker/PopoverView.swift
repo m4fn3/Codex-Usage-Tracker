@@ -93,7 +93,9 @@ struct PopoverView: View {
                 Spacer()
             }
 
-            if let usage = row.usage, usage.hasAnyWindow {
+            if row.needsReauth {
+                reauthNotice
+            } else if let usage = row.usage, usage.hasAnyWindow {
                 if let session = usage.session {
                     UsageRow(title: "Session Usage", subtitle: "5-hour window", window: session)
                 }
@@ -104,11 +106,32 @@ struct PopoverView: View {
                              window: weekly)
                 }
             } else {
-                Text("利用状況を取得できませんでした")
+                Text("利用状況を取得できませんでした（通信エラーの可能性）")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var reauthNotice: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("再ログインが必要です", systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.orange)
+            Text("このアカウントのセッションは終了しています。codex login でログインし直してください。")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(action: { accounts.addAccount() }) {
+                Label("再ログイン", systemImage: "arrow.clockwise.circle")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .buttonStyle(.borderless)
+            .disabled(accounts.loginInProgress)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.10)))
     }
 
     // MARK: - Other accounts
@@ -123,7 +146,10 @@ struct PopoverView: View {
                 AccountSwitchRow(
                     row: row,
                     disabled: accounts.isBusy,
-                    onTap: { Task { await accounts.switchTo(row.id) } },
+                    onTap: {
+                        if row.needsReauth { accounts.addAccount() }
+                        else { Task { await accounts.switchTo(row.id) } }
+                    },
                     onRemove: { Task { await accounts.remove(row.id) } }
                 )
             }
@@ -259,7 +285,11 @@ private struct AccountSwitchRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 6)
-                if let window = headline {
+                if row.needsReauth {
+                    Text("要再ログイン")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.orange)
+                } else if let window = headline {
                     Text("\(Int(window.effectiveUsedPercent().rounded()))%")
                         .font(.system(size: 11, weight: .semibold, design: .rounded))
                         .foregroundStyle(color(for: window))

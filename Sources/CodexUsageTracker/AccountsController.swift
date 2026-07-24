@@ -17,6 +17,8 @@ final class AccountsController: ObservableObject {
     struct Row: Identifiable, Equatable {
         var account: CodexAccount
         var usage: CodexUsage?
+        /// The account's tokens are dead; it needs `codex login` again.
+        var needsReauth: Bool = false
         var id: String { account.id }
     }
 
@@ -52,32 +54,31 @@ final class AccountsController: ObservableObject {
         activeId = reconciled.activeId
 
         // 2. Fetch usage for every account concurrently, capturing any refreshed
-        //    credentials so we can persist them.
+        //    credentials so we can persist them, plus whether each needs re-login.
         let accounts = store.accounts
-        let results: [(CodexAccount, CodexUsage?)] = await withTaskGroup(
-            of: (CodexAccount, CodexUsage?).self
+        let outcomes: [CodexAccountService.UsageOutcome] = await withTaskGroup(
+            of: CodexAccountService.UsageOutcome.self
         ) { group in
             for account in accounts {
-                group.addTask {
-                    let out = await CodexAccountService.usage(for: account)
-                    return (out.account, out.usage)
-                }
+                group.addTask { await CodexAccountService.usage(for: account) }
             }
-            var collected: [(CodexAccount, CodexUsage?)] = []
-            for await result in group { collected.append(result) }
+            var collected: [CodexAccountService.UsageOutcome] = []
+            for await outcome in group { collected.append(outcome) }
             return collected
         }
 
         // 3. Persist refreshed credentials.
-        for (account, _) in results { store.upsert(account) }
+        for outcome in outcomes { store.upsert(outcome.account) }
         try? store.save()
 
         // 4. Build ordered rows.
-        var byId: [String: CodexUsage?] = [:]
+        var usageById: [String: CodexUsage?] = [:]
+        var reauthById: [String: Bool] = [:]
         var accountById: [String: CodexAccount] = [:]
-        for (account, usage) in results {
-            byId[account.id] = usage
-            accountById[account.id] = account
+        for outcome in outcomes {
+            usageById[outcome.account.id] = outcome.usage
+            reauthById[outcome.account.id] = outcome.needsReauth
+            accountById[outcome.account.id] = outcome.account
         }
         let ordered = store.accounts.sorted { lhs, rhs in
             if lhs.id == activeId { return true }
@@ -85,7 +86,9 @@ final class AccountsController: ObservableObject {
             return (lhs.lastUsedAt ?? lhs.addedAt) > (rhs.lastUsedAt ?? rhs.addedAt)
         }
         rows = ordered.map { account in
-            Row(account: accountById[account.id] ?? account, usage: byId[account.id] ?? nil)
+            Row(account: accountById[account.id] ?? account,
+                usage: usageById[account.id] ?? nil,
+                needsReauth: reauthById[account.id] ?? false)
         }
         didLoad = true
         onStateChange?()
@@ -104,10 +107,18 @@ final class AccountsController: ObservableObject {
             try? store.save()
             statusMessage = nil
             await reload()
+        } catch CodexAccountError.needsReauth {
+            statusMessage = "\(account.displayName) は再ログインが必要です（「アカウントを追加」から codex login）"
+            await reload()
+        } catch CodexAccountError.network {
+            statusMessage = "ネットワークエラーで切り替えできませんでした"
         } catch {
             statusMessage = "切り替えに失敗しました"
         }
     }
+
+    /// True when any account (typically the active one) needs re-login.
+    var needsReauth: Bool { rows.contains { $0.needsReauth } }
 
     // MARK: - Capture current login
 
