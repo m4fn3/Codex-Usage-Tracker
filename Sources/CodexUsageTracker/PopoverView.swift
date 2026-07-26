@@ -71,6 +71,9 @@ struct PopoverView: View {
             if row.needsReauth {
                 reauthNotice
             } else if let usage = row.usage, usage.hasAnyWindow {
+                if row.isStale {
+                    StaleNotice(lastFetchedAt: row.lastFetchedAt)
+                }
                 if let session = usage.session {
                     UsageRow(title: "Session Usage", subtitle: "5-hour window", window: session)
                 }
@@ -238,6 +241,30 @@ struct PopoverView: View {
     }
 }
 
+// MARK: - Stale notice (shown when the numbers come from the cache)
+
+/// Banner above the usage rows when the last fetch failed and we're rendering the
+/// previously fetched snapshot.
+private struct StaleNotice: View {
+    let lastFetchedAt: Date?
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "wifi.slash")
+                .font(.system(size: 9))
+            Text(lastFetchedAt.map { "取得できないため前回の値（\(RelativeTime.string(from: $0))）" }
+                 ?? "取得できないため前回の値")
+                .font(.system(size: 10))
+                .lineLimit(1)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.06)))
+    }
+}
+
 // MARK: - Plan badge (plan name + paid-plan days remaining)
 
 private struct PlanBadge: View {
@@ -334,11 +361,17 @@ private struct AccountSwitchRow: View {
                     }
                     .frame(height: 4)
 
-                    if let reset = window.effectiveResetsAt() {
-                        Text("Resets \(reset.resetClockString())")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        if row.isStale {
+                            Image(systemName: "wifi.slash")
+                            Text("前回の値")
+                        }
+                        if let reset = window.effectiveResetsAt() {
+                            Text("Resets \(reset.resetClockString())")
+                        }
                     }
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
                 }
             }
             .padding(.horizontal, 9)
@@ -449,13 +482,15 @@ private struct UsageRow: View {
 // MARK: - Formatting helpers
 
 enum RelativeTime {
-    static func string(from date: Date) -> String {
-        let seconds = -date.timeIntervalSinceNow
-        if seconds < 60 { return "just now" }
+    /// "たった今" / "5分前" / "3時間前" / "2日前" — used for the last-successful-fetch
+    /// label on stale usage.
+    static func string(from date: Date, now: Date = Date()) -> String {
+        let seconds = now.timeIntervalSince(date)
+        if seconds < 60 { return "たった今" }
         let minutes = Int(seconds / 60)
-        if minutes < 60 { return "\(minutes)m ago" }
+        if minutes < 60 { return "\(minutes)分前" }
         let hours = minutes / 60
-        if hours < 24 { return "\(hours)h ago" }
-        return "\(hours / 24)d ago"
+        if hours < 24 { return "\(hours)時間前" }
+        return "\(hours / 24)日前"
     }
 }

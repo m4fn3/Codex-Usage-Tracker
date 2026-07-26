@@ -52,7 +52,7 @@ public enum WindowRole: Sendable, Equatable, Hashable {
 }
 
 /// One rate-limit window as reported by Codex.
-public struct CodexRateWindow: Sendable, Equatable {
+public struct CodexRateWindow: Codable, Sendable, Equatable {
     /// Percentage of the window already consumed as last reported (0–100).
     public var usedPercent: Double
     /// Window length in minutes (300 = 5h session, 10080 = weekly, 43200 = 30-day).
@@ -125,7 +125,7 @@ public struct CodexRateWindow: Sendable, Equatable {
 ///
 /// Either window may be nil: the free plan has no 5-hour session window, and a
 /// paid session window is absent until Codex reports one.
-public struct CodexUsage: Sendable, Equatable {
+public struct CodexUsage: Codable, Sendable, Equatable {
     /// Primary window (rolling ~5-hour session), if reported.
     public var session: CodexRateWindow?
     /// Long window (weekly, or 30-day on free), if reported.
@@ -143,7 +143,8 @@ public struct CodexUsage: Sendable, Equatable {
     /// or the local rollout files (best-effort).
     public var source: Source
 
-    public enum Source: Sendable, Equatable {
+    /// String-backed so cached snapshots survive a JSON round-trip readably.
+    public enum Source: String, Codable, Sendable, Equatable {
         case liveAPI
         case localFiles
     }

@@ -19,6 +19,11 @@ final class AccountsController: ObservableObject {
         var usage: CodexUsage?
         /// The account's tokens are dead; it needs `codex login` again.
         var needsReauth: Bool = false
+        /// `usage` is the last-known-good snapshot because this fetch failed
+        /// (network error) — shown as-is with an "outdated" note.
+        var isStale: Bool = false
+        /// When `usage` was last fetched successfully.
+        var lastFetchedAt: Date?
         var id: String { account.id }
     }
 
@@ -37,13 +42,12 @@ final class AccountsController: ObservableObject {
     var onStateChange: (() -> Void)?
 
     private var store = CodexAccountStore.load()
+    /// Last-known-good usage per account, so a failed fetch shows the previous
+    /// numbers instead of blanking out.
+    private var usageCache = CodexUsageCache.load()
     private var loginTask: Task<Void, Never>?
 
-    /// Usage for the currently active account (what the menu bar shows).
-    var activeUsage: CodexUsage? {
-        rows.first { $0.id == activeId }?.usage
-    }
-
+    /// The currently active account's row — what the menu bar renders.
     var activeRow: Row? { rows.first { $0.id == activeId } }
     var otherRows: [Row] { rows.filter { $0.id != activeId } }
 
@@ -73,24 +77,39 @@ final class AccountsController: ObservableObject {
         for outcome in outcomes { store.upsert(outcome.account) }
         try? store.save()
 
-        // 4. Build ordered rows.
-        var usageById: [String: CodexUsage?] = [:]
+        // 4. Resolve what to display: fresh usage when the fetch worked, otherwise
+        //    the cached snapshot (flagged stale) so a network error doesn't blank
+        //    the numbers. Successful fetches refresh the cache.
+        let now = Date()
+        var resolvedById: [String: ResolvedUsage] = [:]
         var reauthById: [String: Bool] = [:]
         var accountById: [String: CodexAccount] = [:]
         for outcome in outcomes {
-            usageById[outcome.account.id] = outcome.usage
+            resolvedById[outcome.account.id] = usageCache.resolve(
+                fetched: outcome.usage,
+                for: outcome.account.id,
+                needsReauth: outcome.needsReauth,
+                now: now
+            )
             reauthById[outcome.account.id] = outcome.needsReauth
             accountById[outcome.account.id] = outcome.account
         }
+        usageCache.prune(keeping: store.accounts.map(\.id))
+        try? usageCache.save()
+
+        // 5. Build ordered rows.
         let ordered = store.accounts.sorted { lhs, rhs in
             if lhs.id == activeId { return true }
             if rhs.id == activeId { return false }
             return (lhs.lastUsedAt ?? lhs.addedAt) > (rhs.lastUsedAt ?? rhs.addedAt)
         }
         rows = ordered.map { account in
-            Row(account: accountById[account.id] ?? account,
-                usage: usageById[account.id] ?? nil,
-                needsReauth: reauthById[account.id] ?? false)
+            let resolved = resolvedById[account.id]
+            return Row(account: accountById[account.id] ?? account,
+                       usage: resolved?.usage,
+                       needsReauth: reauthById[account.id] ?? false,
+                       isStale: resolved?.isStale ?? false,
+                       lastFetchedAt: resolved?.lastFetchedAt)
         }
         didLoad = true
         onStateChange?()

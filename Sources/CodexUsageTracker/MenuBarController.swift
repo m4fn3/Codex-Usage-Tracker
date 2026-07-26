@@ -96,11 +96,19 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         // left = weekly (all models), right = session (5-hour window). Either
         // window may be absent, so render only the windows we actually have.
         let now = Date()
-        let usage = accounts.activeUsage
+        let row = accounts.activeRow
+        let usage = row?.usage
         let specs: [RingSpec] = [
             usage?.weekly.map { ringSpec(for: $0, now: now) },
             usage?.session.map { ringSpec(for: $0, now: now) },
         ].compactMap { $0 }
+
+        // When the fetch failed we keep drawing the last-known values, so say so in
+        // the tooltip rather than silently passing off stale numbers as current.
+        button.toolTip = (row?.isStale == true)
+            ? "Codex Usage — 取得できないため前回の値を表示中"
+                + (row?.lastFetchedAt.map { "（最終取得 \(RelativeTime.string(from: $0))）" } ?? "")
+            : "Codex Usage"
 
         guard !specs.isEmpty else {
             button.image = nil
