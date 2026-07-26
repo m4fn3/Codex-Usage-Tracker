@@ -58,6 +58,15 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             object: nil
         )
 
+        // A limit can reset while the Mac is asleep, and the auto-start should not
+        // have to wait for the next timer tick to notice.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(systemDidWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+
         refresh()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
             // Timer fires on the main run loop, so we're already on the main actor.
@@ -68,6 +77,11 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     deinit {
         refreshTimer?.invalidate()
         DistributedNotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    @objc private func systemDidWake() {
+        refresh()
     }
 
     // MARK: - Appearance

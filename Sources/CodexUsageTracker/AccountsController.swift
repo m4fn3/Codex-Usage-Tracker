@@ -47,6 +47,14 @@ final class AccountsController: ObservableObject {
     private var usageCache = CodexUsageCache.load()
     private var loginTask: Task<Void, Never>?
 
+    /// What the weekly-reset auto-start has already done, per account. Persisted,
+    /// because "exactly once per window" has to survive relaunches.
+    private var autoStartState = CodexAutoStartState.load()
+    /// Set while the auto-start pass runs, so the reload it triggers on success
+    /// (and any overlapping reload) can't start a second request for the same
+    /// window before the first one is recorded.
+    private var autoStartInFlight = false
+
     /// The currently active account's row — what the menu bar renders.
     var activeRow: Row? { rows.first { $0.id == activeId } }
     var otherRows: [Row] { rows.filter { $0.id != activeId } }
@@ -84,7 +92,12 @@ final class AccountsController: ObservableObject {
         var resolvedById: [String: ResolvedUsage] = [:]
         var reauthById: [String: Bool] = [:]
         var accountById: [String: CodexAccount] = [:]
+        var autoStartInputs: [AutoStartInput] = []
         for outcome in outcomes {
+            // Capture the previous snapshot before resolve() overwrites it: it is
+            // the only record of the old window's reset time once the server stops
+            // reporting a lapsed window.
+            let previous = usageCache.entry(for: outcome.account.id)?.usage
             resolvedById[outcome.account.id] = usageCache.resolve(
                 fetched: outcome.usage,
                 for: outcome.account.id,
@@ -93,6 +106,13 @@ final class AccountsController: ObservableObject {
             )
             reauthById[outcome.account.id] = outcome.needsReauth
             accountById[outcome.account.id] = outcome.account
+            autoStartInputs.append(AutoStartInput(
+                account: outcome.account,
+                needsReauth: outcome.needsReauth,
+                fetchSucceeded: outcome.fetchSucceeded,
+                reported: outcome.usage,
+                cached: previous
+            ))
         }
         usageCache.prune(keeping: store.accounts.map(\.id))
         try? usageCache.save()
@@ -116,6 +136,99 @@ final class AccountsController: ObservableObject {
 
         // Refresh the running-Codex count (ps runs off the main actor).
         runningCodexCount = await Task.detached { CodexProcessKiller.findCodexPIDs().count }.value
+
+        // 6. Anchor any window that has run out (at most one request per window).
+        await runAutoStartPass(autoStartInputs)
+    }
+
+    // MARK: - Weekly-reset auto-start
+
+    /// One account's inputs to the auto-start decision, captured during the fetch.
+    private struct AutoStartInput {
+        var account: CodexAccount
+        var needsReauth: Bool
+        var fetchSucceeded: Bool
+        var reported: CodexUsage?
+        var cached: CodexUsage?
+    }
+
+    /// Sends the window-anchoring request for every account whose weekly window has
+    /// lapsed. `CodexAutoStartPolicy` owns the "is this the right moment?" question;
+    /// this method only performs what it decides and records the outcome.
+    private func runAutoStartPass(_ inputs: [AutoStartInput]) async {
+        guard !autoStartInFlight else { return }
+        autoStartInFlight = true
+        defer { autoStartInFlight = false }
+
+        let enabled = AutoStartSettings.isEnabled
+        let policy = CodexAutoStartPolicy.default
+        var didStart = false
+
+        for input in inputs {
+            let decision = policy.decide(
+                enabled: enabled,
+                needsReauth: input.needsReauth,
+                fetchSucceeded: input.fetchSucceeded,
+                reported: input.reported,
+                cached: input.cached,
+                state: autoStartState.entry(for: input.account.id),
+                now: Date()
+            )
+            guard case .start(let boundary) = decision else { continue }
+
+            // Count the attempt BEFORE sending: if the app dies mid-request, the
+            // next launch must see that we already spent one, not start over.
+            autoStartState.recordAttempt(accountId: input.account.id, boundary: boundary, now: Date())
+            try? autoStartState.save()
+
+            do {
+                let result = try await CodexSessionStarter.start(auth: input.account.auth)
+                autoStartState.recordSuccess(
+                    accountId: input.account.id,
+                    boundary: boundary,
+                    now: Date(),
+                    model: result.model
+                )
+                statusMessage = "\(input.account.displayName)：制限リセットを検知し、新しいウィンドウを開始しました"
+                didStart = true
+            } catch {
+                autoStartState.recordFailure(
+                    accountId: input.account.id,
+                    boundary: boundary,
+                    now: Date(),
+                    error: Self.describe(error)
+                )
+                statusMessage = "\(input.account.displayName)：自動開始に失敗しました（\(Self.describe(error))）"
+            }
+            try? autoStartState.save()
+        }
+
+        autoStartState.prune(keeping: store.accounts.map(\.id))
+        try? autoStartState.save()
+
+        // Show the freshly anchored window right away (the reentrancy guard above
+        // keeps this reload from running the pass again).
+        if didStart { await reload() }
+    }
+
+    /// Last successful auto-start for an account, for the popover's status line.
+    func lastAutoStart(for accountId: String) -> (date: Date, model: String?)? {
+        guard let entry = autoStartState.entry(for: accountId), let date = entry.startedAt else {
+            return nil
+        }
+        return (date, entry.startedModel)
+    }
+
+    private static func describe(_ error: Error) -> String {
+        guard let error = error as? CodexSessionStartError else { return error.localizedDescription }
+        switch error {
+        case .unauthorized:              return "認証エラー"
+        case .noModelAvailable:          return "使えるモデルが見つかりません"
+        case .rejected(let detail):      return detail ?? "リクエストが拒否されました"
+        case .http(let code):            return "HTTP \(code)"
+        case .incompleteStream:          return "応答が途中で終了しました"
+        case .transport(let message):    return message
+        }
     }
 
     // MARK: - Switch

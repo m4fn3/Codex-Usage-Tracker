@@ -19,6 +19,7 @@ struct PopoverView: View {
     var onQuit: () -> Void
 
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
+    @State private var autoStartOnReset = AutoStartSettings.isEnabled
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -170,11 +171,39 @@ struct PopoverView: View {
             .buttonStyle(.borderless)
             .disabled(accounts.isBusy)
 
+            autoStartControl
+
             if let message = accounts.statusMessage, !message.isEmpty {
                 Text(message)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// The weekly-reset auto-start switch, with the last send underneath it so the
+    /// one request this app ever spends is never invisible.
+    private var autoStartControl: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Toggle(isOn: $autoStartOnReset) {
+                Text("リセット時に自動でウィンドウを開始")
+                    .font(.system(size: 11))
+            }
+            .toggleStyle(.checkbox)
+            .help("制限がリセットされた直後に極小のリクエストを1回だけ送り、新しいウィンドウの起点をすぐ確定させます（各ウィンドウにつき1回だけ）")
+            .onChange(of: autoStartOnReset) { newValue in
+                AutoStartSettings.isEnabled = newValue
+            }
+
+            if autoStartOnReset,
+               let active = accounts.activeRow,
+               let last = accounts.lastAutoStart(for: active.id) {
+                Text("前回の自動開始：\(RelativeTime.string(from: last.date))"
+                     + (last.model.map { "（\($0)）" } ?? ""))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 18)
             }
         }
     }

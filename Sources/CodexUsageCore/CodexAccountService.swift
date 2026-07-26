@@ -55,6 +55,11 @@ public enum CodexAccountService {
         /// Set when the account's tokens are revoked/invalidated and a re-login is
         /// required (refresh could not recover them).
         public var needsReauth: Bool
+        /// True when the API call itself reached the server and returned usable
+        /// data. Distinct from `usage != nil`, which is also nil when a *successful*
+        /// response carried no window at all — a difference the auto-start policy
+        /// depends on, since it must never act on numbers we failed to fetch.
+        public var fetchSucceeded: Bool = false
     }
 
     /// Fetches an account's usage. Refreshes proactively when the token is expired,
@@ -80,14 +85,14 @@ public enum CodexAccountService {
 
         do {
             let usage = try await CodexUsageAPI.fetch(auth: account.auth, now: now, session: session)
-            return UsageOutcome(usage: usage, account: account, needsReauth: false)
+            return UsageOutcome(usage: usage, account: account, needsReauth: false, fetchSucceeded: true)
         } catch CodexUsageAPIError.unauthorized {
             // Revoked despite a valid-looking expiry — try one refresh + retry.
             switch await tryRefresh(account, now: now, session: session) {
             case .refreshed(let updated):
                 account = updated
                 if let usage = try? await CodexUsageAPI.fetch(auth: account.auth, now: now, session: session) {
-                    return UsageOutcome(usage: usage, account: account, needsReauth: false)
+                    return UsageOutcome(usage: usage, account: account, needsReauth: false, fetchSucceeded: true)
                 }
                 return UsageOutcome(usage: nil, account: account, needsReauth: true)
             case .invalidated:

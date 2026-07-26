@@ -39,10 +39,14 @@ public enum CodexUsageAPI {
     static let usagePath = "/wham/usage"
 
     /// Honors `CODEX_USAGE_BASE_URL` (rare self-hosted setups); defaults to ChatGPT.
-    static func usageURL(env: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+    /// Shared with `CodexSessionStarter`, which hangs its own paths off the same base.
+    static func baseURLString(env: [String: String] = ProcessInfo.processInfo.environment) -> String {
         let base = env["CODEX_USAGE_BASE_URL"].flatMap { $0.isEmpty ? nil : $0 } ?? defaultBaseURL
-        let trimmed = base.hasSuffix("/") ? String(base.dropLast()) : base
-        return URL(string: trimmed + usagePath) ?? URL(string: defaultBaseURL + usagePath)!
+        return base.hasSuffix("/") ? String(base.dropLast()) : base
+    }
+
+    static func usageURL(env: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        URL(string: baseURLString(env: env) + usagePath) ?? URL(string: defaultBaseURL + usagePath)!
     }
 
     // MARK: - Fetch
