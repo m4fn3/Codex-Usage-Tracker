@@ -60,15 +60,18 @@ one expires, it begins on the **first request after** that — the server stamps
 So a week you don't touch until Friday now resets the *following* Friday, and the
 reset drifts later every cycle.
 
-With **リセット時に自動でウィンドウを開始** ticked in the popover (on by default),
-the app watches for a window whose `reset_at` has passed and sends one throwaway
-request — `"hi"`, no tools, `store: false`, cheapest available model — so the new
-window is anchored right away. It's the same trick as Claude Usage Tracker's
-auto-start-session, keyed on the weekly window instead of the 5-hour one.
+With **自動開始** ticked in the popover footer (on by default), the app watches for
+a window whose `reset_at` has passed and sends one throwaway request — `"hi"`, no
+tools, `store: false` — so the new window is anchored right away. It's the same
+trick as Claude Usage Tracker's auto-start-session, keyed on the weekly window
+instead of the 5-hour one.
 
-The model is picked from the account's own catalog
-(`GET /backend-api/codex/models?client_version=…`, preferring `mini`/`nano` and
-the cheapest reasoning effort), falling back to the `model` in `~/.codex/config.toml`.
+The request is pinned to **`gpt-5.6-luna` at `low` effort**. That model is checked
+against the account's own catalog (`GET /backend-api/codex/models?client_version=…`);
+if it's ever gone, the ranking falls back to the cheapest models the plan allows
+(`mini`/`nano` first, cheapest supported effort), then to the `model` in
+`~/.codex/config.toml`. A 400 — the request was refused before it ran, so nothing
+was charged — moves on to the next candidate.
 
 **Exactly once per window** is the whole game, since this is the only thing in the
 app that spends quota. The rules, all in `CodexAutoStartPolicy` (pure, unit-tested):

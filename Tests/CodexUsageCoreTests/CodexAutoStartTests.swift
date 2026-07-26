@@ -321,6 +321,30 @@ struct CodexSessionStarterTests {
         #expect(ranked.map(\.slug) == ["gpt-5.6-sol"])
     }
 
+    @Test func `the pinned model wins, at the pinned effort`() throws {
+        let models = try catalog("""
+        {"models": [
+          {"slug": "gpt-5.4-mini", "visibility": "list",
+           "supported_reasoning_levels": [{"effort": "low"}]},
+          {"slug": "gpt-5.6-luna", "visibility": "list",
+           "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}]}
+        ]}
+        """)
+        let ranked = CodexSessionStarter.rank(models, planType: "plus")
+        #expect(ranked.first == .init(slug: "gpt-5.6-luna", effort: "low"))
+        #expect(ranked.map(\.slug) == ["gpt-5.6-luna", "gpt-5.4-mini"])   // mini is the fallback
+    }
+
+    @Test func `a catalog without the pinned model falls back to the cheapest`() throws {
+        let models = try catalog("""
+        {"models": [
+          {"slug": "gpt-5.6-sol", "visibility": "list"},
+          {"slug": "gpt-5.4-mini", "visibility": "list"}
+        ]}
+        """)
+        #expect(CodexSessionStarter.rank(models, planType: "plus").first?.slug == "gpt-5.4-mini")
+    }
+
     @Test func `the cheapest model wins`() throws {
         let models = try catalog("""
         {"models": [

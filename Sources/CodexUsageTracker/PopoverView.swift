@@ -171,39 +171,11 @@ struct PopoverView: View {
             .buttonStyle(.borderless)
             .disabled(accounts.isBusy)
 
-            autoStartControl
-
             if let message = accounts.statusMessage, !message.isEmpty {
                 Text(message)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    /// The weekly-reset auto-start switch, with the last send underneath it so the
-    /// one request this app ever spends is never invisible.
-    private var autoStartControl: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Toggle(isOn: $autoStartOnReset) {
-                Text("リセット時に自動でウィンドウを開始")
-                    .font(.system(size: 11))
-            }
-            .toggleStyle(.checkbox)
-            .help("制限がリセットされた直後に極小のリクエストを1回だけ送り、新しいウィンドウの起点をすぐ確定させます（各ウィンドウにつき1回だけ）")
-            .onChange(of: autoStartOnReset) { newValue in
-                AutoStartSettings.isEnabled = newValue
-            }
-
-            if autoStartOnReset,
-               let active = accounts.activeRow,
-               let last = accounts.lastAutoStart(for: active.id) {
-                Text("前回の自動開始：\(RelativeTime.string(from: last.date))"
-                     + (last.model.map { "（\($0)）" } ?? ""))
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, 18)
             }
         }
     }
@@ -241,6 +213,17 @@ struct PopoverView: View {
                 .onChange(of: launchAtLogin) { newValue in
                     LaunchAtLogin.setEnabled(newValue)
                 }
+
+            // Deliberately as quiet as the login toggle: it runs once a week and
+            // needs no attention. The detail lives in the tooltip.
+            Toggle("自動開始", isOn: $autoStartOnReset)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .help(autoStartHelp)
+                .onChange(of: autoStartOnReset) { newValue in
+                    AutoStartSettings.isEnabled = newValue
+                }
             Spacer()
             Button(action: onRefresh) {
                 Image(systemName: "arrow.clockwise")
@@ -256,6 +239,17 @@ struct PopoverView: View {
             .help("Quit Codex Usage")
         }
         .padding(.top, 2)
+    }
+
+    /// Tooltip for the auto-start toggle — also where the last send is reported, so
+    /// the one request this app ever spends stays inspectable without taking up
+    /// room in the popover.
+    private var autoStartHelp: String {
+        let explanation = "制限がリセットされた直後に極小のリクエストを1回だけ送り、新しいウィンドウの起点をすぐ確定させます（各ウィンドウにつき1回だけ）"
+        guard let active = accounts.activeRow,
+              let last = accounts.lastAutoStart(for: active.id) else { return explanation }
+        return explanation + "\n前回の自動開始：\(RelativeTime.string(from: last.date))"
+            + (last.model.map { "（\($0)）" } ?? "")
     }
 
     /// Human label for the long window, derived from its length: weekly (10080)

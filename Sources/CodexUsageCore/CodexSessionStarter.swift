@@ -68,8 +68,15 @@ public enum CodexSessionStarter {
     static let prompt = "hi"
     static let instructions = "Reply with exactly one word: ok"
 
-    /// Models we prefer when several are available — the small ones cost the least
-    /// of the window we're about to open.
+    /// The model this request is pinned to, at this effort. Chosen deliberately
+    /// rather than "whatever is cheapest": the account has it, and it keeps the
+    /// anchoring turn identical week to week. Used whenever the catalog still
+    /// offers it — everything below is only the fallback for when it doesn't.
+    static let preferredModel = "gpt-5.6-luna"
+    static let preferredEffort = "low"
+
+    /// Fallback ordering when the pinned model is gone: the small ones cost the
+    /// least of the window we're about to open.
     static let cheapModelMarkers = ["mini", "nano"]
     /// Cheapest reasoning efforts, in order of preference.
     static let cheapEfforts = ["none", "minimal", "low"]
@@ -243,10 +250,13 @@ public enum CodexSessionStarter {
             let ranked = rank(catalog, planType: auth.planType, limit: limit)
             if !ranked.isEmpty { return ranked }
         }
-        if let configured = configuredModel() {
-            return [ModelChoice(slug: configured)]
+        // No catalog: send the pinned model anyway, then whatever the local CLI is
+        // set to — a model this machine's login demonstrably runs.
+        var fallback = [ModelChoice(slug: preferredModel, effort: preferredEffort)]
+        if let configured = configuredModel(), configured != preferredModel {
+            fallback.append(ModelChoice(slug: configured))
         }
-        return []
+        return fallback
     }
 
     static func catalogURL(env: [String: String] = ProcessInfo.processInfo.environment) -> URL {
@@ -275,8 +285,9 @@ public enum CodexSessionStarter {
         return catalog
     }
 
-    /// Orders the catalog into the models worth trying: user-selectable ones the
-    /// account's plan allows, cheapest first.
+    /// Orders the catalog into the models worth trying: the pinned model first when
+    /// the account still has it, then user-selectable ones its plan allows,
+    /// cheapest first.
     static func rank(_ catalog: ModelCatalog, planType: String?, limit: Int = 3) -> [ModelChoice] {
         let named = catalog.models.filter { ($0.slug?.isEmpty == false) }
         // "hide" covers internal models (e.g. codex-auto-review) that a normal
@@ -293,9 +304,14 @@ public enum CodexSessionStarter {
         }
 
         let cheapFirst = usable.filter(isCheap) + usable.filter { !isCheap($0) }
-        return cheapFirst.prefix(limit).map {
-            ModelChoice(slug: $0.slug ?? "", effort: cheapestEffort($0))
+        let pinnedFirst = cheapFirst.filter(isPinned) + cheapFirst.filter { !isPinned($0) }
+        return pinnedFirst.prefix(limit).map {
+            ModelChoice(slug: $0.slug ?? "", effort: effort(for: $0))
         }
+    }
+
+    private static func isPinned(_ model: ModelCatalog.Model) -> Bool {
+        model.slug?.lowercased() == preferredModel
     }
 
     private static func isCheap(_ model: ModelCatalog.Model) -> Bool {
@@ -303,8 +319,14 @@ public enum CodexSessionStarter {
         return cheapModelMarkers.contains { slug.contains($0) }
     }
 
-    private static func cheapestEffort(_ model: ModelCatalog.Model) -> String? {
+    /// `low` for the pinned model as chosen; for anything else the cheapest effort
+    /// the catalog says it supports (and none at all when it lists none, so the
+    /// server picks its own default).
+    private static func effort(for model: ModelCatalog.Model) -> String? {
         let supported = (model.supportedReasoningLevels ?? []).compactMap { $0.effort?.lowercased() }
+        if isPinned(model), supported.isEmpty || supported.contains(preferredEffort) {
+            return preferredEffort
+        }
         guard !supported.isEmpty else { return nil }
         return cheapEfforts.first { supported.contains($0) }
     }
