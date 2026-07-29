@@ -101,6 +101,50 @@ struct CodexAccountCredentialTests {
     }
 }
 
+// MARK: - Menu-bar ordering
+
+/// The menu bar draws one ring per account side by side, so the order has to be
+/// fixed: if it tracked the active or most-recently-used account, every switch
+/// would shuffle the icons and a given position would stop meaning anything.
+struct CodexAccountPresentationOrderTests {
+
+    private func added(_ id: String, _ offset: TimeInterval) -> CodexAccount {
+        var a = account(id)
+        a.addedAt = now.addingTimeInterval(offset)
+        return a
+    }
+
+    @Test func `accounts are ordered by when they were added`() {
+        var store = CodexAccountStore()
+        store.upsert(added("acct-c", 300))
+        store.upsert(added("acct-a", 100))
+        store.upsert(added("acct-b", 200))
+
+        #expect(store.inPresentationOrder.map(\.id) == ["acct-a", "acct-b", "acct-c"])
+    }
+
+    @Test func `the order does not move when an account is used`() {
+        var store = CodexAccountStore()
+        store.upsert(added("acct-a", 100))
+        store.upsert(added("acct-b", 200))
+
+        // Switching to (and refreshing) the newer account must not promote it.
+        var used = store.accounts[1]
+        used.lastUsedAt = now.addingTimeInterval(10_000)
+        store.upsert(used)
+
+        #expect(store.inPresentationOrder.map(\.id) == ["acct-a", "acct-b"])
+    }
+
+    @Test func `accounts added in the same instant still have one fixed order`() {
+        var store = CodexAccountStore()
+        store.upsert(added("acct-b", 0))
+        store.upsert(added("acct-a", 0))
+
+        #expect(store.inPresentationOrder.map(\.id) == ["acct-a", "acct-b"])
+    }
+}
+
 struct CodexProcessMatchTests {
     @Test func `matches the codex CLI binary exactly, not lookalikes`() {
         #expect(CodexProcessKiller.isCodexCommand("/opt/homebrew/bin/codex") == true)

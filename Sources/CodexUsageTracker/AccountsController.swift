@@ -55,9 +55,16 @@ final class AccountsController: ObservableObject {
     /// window before the first one is recorded.
     private var autoStartInFlight = false
 
-    /// The currently active account's row — what the menu bar renders.
+    /// The currently active account's row — what the popover details.
     var activeRow: Row? { rows.first { $0.id == activeId } }
     var otherRows: [Row] { rows.filter { $0.id != activeId } }
+
+    /// Every account in the fixed order the menu bar draws them in. Unlike `rows`
+    /// (active first, then most-recently-used) this never reorders on a switch, so
+    /// a given account keeps its position in the status bar.
+    var menuBarRows: [Row] {
+        rows.sorted { CodexAccount.presentationOrder($0.account, $1.account) }
+    }
 
     // MARK: - Load
 
@@ -152,9 +159,10 @@ final class AccountsController: ObservableObject {
         var cached: CodexUsage?
     }
 
-    /// Sends the window-anchoring request for every account whose weekly window has
-    /// lapsed. `CodexAutoStartPolicy` owns the "is this the right moment?" question;
-    /// this method only performs what it decides and records the outcome.
+    /// Sends the window-anchoring request for EVERY logged-in account whose weekly
+    /// window has lapsed or has never been started. `CodexAutoStartPolicy` owns the
+    /// "is this the right moment?" question; this method only performs what it
+    /// decides and records the outcome.
     private func runAutoStartPass(_ inputs: [AutoStartInput]) async {
         guard !autoStartInFlight else { return }
         autoStartInFlight = true
@@ -162,7 +170,10 @@ final class AccountsController: ObservableObject {
 
         let enabled = AutoStartSettings.isEnabled
         let policy = CodexAutoStartPolicy.default
-        var didStart = false
+        // Collected rather than assigned per account: with several accounts the
+        // last one's message used to be the only one the user ever saw.
+        var started: [String] = []
+        var failed: [String] = []
 
         for input in inputs {
             let decision = policy.decide(
@@ -174,31 +185,67 @@ final class AccountsController: ObservableObject {
                 state: autoStartState.entry(for: input.account.id),
                 now: Date()
             )
-            guard case .start(let boundary) = decision else { continue }
+
+            /// The expired window this send retires, or nil when the window had
+            /// never been started (which has no boundary to record it under).
+            let boundary: Date?
+            switch decision {
+            case .start(let expired):
+                boundary = expired
+            case .startUnanchored:
+                boundary = nil
+            case .skip(let reason):
+                // Seeing the window run is the proof that an earlier anchoring
+                // attempt landed, so the next unanchored spell starts fresh.
+                if reason == .windowRunning, autoStartState.clearUnanchored(accountId: input.account.id) {
+                    try? autoStartState.save()
+                }
+                continue
+            }
 
             // Count the attempt BEFORE sending: if the app dies mid-request, the
             // next launch must see that we already spent one, not start over.
-            autoStartState.recordAttempt(accountId: input.account.id, boundary: boundary, now: Date())
+            if let boundary {
+                autoStartState.recordAttempt(accountId: input.account.id, boundary: boundary, now: Date())
+            } else {
+                autoStartState.recordUnanchoredAttempt(accountId: input.account.id, now: Date())
+            }
             try? autoStartState.save()
 
             do {
                 let result = try await CodexSessionStarter.start(auth: input.account.auth)
-                autoStartState.recordSuccess(
-                    accountId: input.account.id,
-                    boundary: boundary,
-                    now: Date(),
-                    model: result.model
-                )
-                statusMessage = "\(input.account.displayName)：制限リセットを検知し、新しいウィンドウを開始しました"
-                didStart = true
+                if let boundary {
+                    autoStartState.recordSuccess(
+                        accountId: input.account.id,
+                        boundary: boundary,
+                        now: Date(),
+                        model: result.model
+                    )
+                } else {
+                    autoStartState.recordUnanchoredSuccess(
+                        accountId: input.account.id,
+                        now: Date(),
+                        model: result.model
+                    )
+                }
+                started.append(input.account.displayName)
             } catch {
-                autoStartState.recordFailure(
-                    accountId: input.account.id,
-                    boundary: boundary,
-                    now: Date(),
-                    error: Self.describe(error)
-                )
-                statusMessage = "\(input.account.displayName)：自動開始に失敗しました（\(Self.describe(error))）"
+                let reason = Self.describe(error)
+                if let boundary {
+                    autoStartState.recordFailure(
+                        accountId: input.account.id,
+                        boundary: boundary,
+                        now: Date(),
+                        error: reason
+                    )
+                } else {
+                    autoStartState.recordUnanchoredFailure(
+                        accountId: input.account.id,
+                        now: Date(),
+                        error: reason
+                    )
+                }
+                failed.append("\(input.account.displayName)（\(reason)）")
             }
             try? autoStartState.save()
         }
@@ -206,9 +253,14 @@ final class AccountsController: ObservableObject {
         autoStartState.prune(keeping: store.accounts.map(\.id))
         try? autoStartState.save()
 
+        var lines: [String] = []
+        if !started.isEmpty { lines.append("新しいウィンドウを開始しました：" + started.joined(separator: "、")) }
+        if !failed.isEmpty { lines.append("自動開始に失敗しました：" + failed.joined(separator: "、")) }
+        if !lines.isEmpty { statusMessage = lines.joined(separator: "\n") }
+
         // Show the freshly anchored window right away (the reentrancy guard above
         // keeps this reload from running the pass again).
-        if didStart { await reload() }
+        if !started.isEmpty { await reload() }
     }
 
     /// Last successful auto-start for an account, for the popover's status line.

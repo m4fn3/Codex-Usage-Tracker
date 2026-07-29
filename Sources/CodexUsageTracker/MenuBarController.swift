@@ -106,47 +106,75 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
 
     private func updateButton() {
         guard let button = statusItem.button else { return }
-        // The menu bar shows only the ACTIVE account. Two rings side by side:
-        // left = weekly (all models), right = session (5-hour window). Either
-        // window may be absent, so render only the windows we actually have.
+        // EVERY logged-in account, one ring each for the long (weekly / 30-day)
+        // window, always in the same order. The 5-hour session window is left to
+        // the popover: the menu bar's budget is horizontal space, and doubling the
+        // rings to show it would cost more than it tells.
         let now = Date()
-        let row = accounts.activeRow
-        let usage = row?.usage
-        let specs: [RingSpec] = [
-            usage?.weekly.map { ringSpec(for: $0, now: now) },
-            usage?.session.map { ringSpec(for: $0, now: now) },
-        ].compactMap { $0 }
+        let rows = accounts.menuBarRows
 
-        // When the fetch failed we keep drawing the last-known values, so say so in
-        // the tooltip rather than silently passing off stale numbers as current.
-        button.toolTip = (row?.isStale == true)
-            ? "Codex Usage — 取得できないため前回の値を表示中"
-                + (row?.lastFetchedAt.map { "（最終取得 \(RelativeTime.string(from: $0))）" } ?? "")
-            : "Codex Usage"
-
-        guard !specs.isEmpty else {
+        guard !rows.isEmpty else {
             button.image = nil
             button.title = accounts.didLoad ? "—" : "…"
+            button.toolTip = "Codex Usage"
             return
         }
 
-        let image = MenuBarIconRenderer.ringsImage(
-            specs,
+        let groups = rows.map { row in
+            RingGroup(specs: [ringSpec(for: row, now: now)], isActive: row.id == accounts.activeId)
+        }
+        let image = MenuBarIconRenderer.groupsImage(
+            groups,
             isDark: isDarkMenuBar,
-            borderColor: Self.codexBorderColor
+            chipColor: Self.codexBorderColor
         )
         image.isTemplate = false   // rings use status colors, so not a template
         button.image = image
         button.title = ""
+        button.toolTip = tooltip(for: rows, now: now)
     }
 
-    private func ringSpec(for window: CodexRateWindow, now: Date) -> RingSpec {
-        RingSpec(
+    /// One ring per account: the long window when we have it, the session window
+    /// as a stand-in, and a marker when there is nothing to show at all.
+    private func ringSpec(for row: AccountsController.Row, now: Date) -> RingSpec {
+        if row.needsReauth {
+            return RingSpec(percent: 0, status: .moderate, elapsedFraction: nil,
+                            label: nil, placeholder: .needsReauth)
+        }
+        guard let window = row.usage?.weekly ?? row.usage?.session else {
+            return RingSpec(percent: 0, status: .safe, elapsedFraction: nil,
+                            label: nil, placeholder: .unknown)
+        }
+        return RingSpec(
             percent: window.effectiveUsedPercent(now: now),
             status: window.status(now: now),
             elapsedFraction: window.elapsedFraction(now: now),
             label: nil
         )
+    }
+
+    /// Names every account in drawing order, so the dimmed rings can be told apart
+    /// without opening the popover. The active one is marked, and a fetch we failed
+    /// to make is called out rather than passed off as current.
+    private func tooltip(for rows: [AccountsController.Row], now: Date) -> String {
+        let lines = rows.map { row -> String in
+            let marker = row.id == accounts.activeId ? "● " : "　"
+            let detail: String
+            if row.needsReauth {
+                detail = "要再ログイン"
+            } else if let window = row.usage?.weekly ?? row.usage?.session {
+                let percent = Int(window.effectiveUsedPercent(now: now).rounded())
+                detail = row.isStale
+                    ? "\(percent)%（前回の値"
+                        + (row.lastFetchedAt.map { "・\(RelativeTime.string(from: $0))" } ?? "")
+                        + "）"
+                    : "\(percent)%"
+            } else {
+                detail = "取得できません"
+            }
+            return marker + row.account.displayName + " — " + detail
+        }
+        return (["Codex Usage（● = ログイン中）"] + lines).joined(separator: "\n")
     }
 
     // MARK: - Popover

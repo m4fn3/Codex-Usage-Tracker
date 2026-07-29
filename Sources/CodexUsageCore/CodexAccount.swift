@@ -63,6 +63,18 @@ public struct CodexAccount: Codable, Sendable, Equatable, Identifiable {
         return "ChatGPT (" + id.prefix(8) + ")"
     }
 
+    /// Fixed presentation order for the menu bar: oldest-added first, ties broken
+    /// by id so the result is total and stable.
+    ///
+    /// Deliberately blind to which account is active or most recently used — the
+    /// row of menu-bar icons must stay put when the user switches logins, or every
+    /// switch would shuffle the icons under their cursor and the position of a
+    /// given account would stop meaning anything.
+    public static func presentationOrder(_ lhs: CodexAccount, _ rhs: CodexAccount) -> Bool {
+        if lhs.addedAt != rhs.addedAt { return lhs.addedAt < rhs.addedAt }
+        return lhs.id < rhs.id
+    }
+
     /// Auth view used by the usage API and token refresh.
     public var auth: CodexAuth {
         CodexAuth(

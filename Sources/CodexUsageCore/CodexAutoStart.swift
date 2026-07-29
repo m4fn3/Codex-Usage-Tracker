@@ -31,6 +31,10 @@ public enum CodexAutoStartDecision: Sendable, Equatable {
     /// `resets_at` — the identity of the window we're replacing, and the key the
     /// outcome must be recorded under.
     case start(boundary: Date)
+    /// Send the throwaway request for a window that has never been started at all
+    /// (see `isUnanchored`). There is no boundary to record it under, so the
+    /// outcome goes to the entry's separate unanchored counters.
+    case startUnanchored
     case skip(CodexAutoStartSkip)
 }
 
@@ -53,6 +57,12 @@ public enum CodexAutoStartSkip: String, Sendable, Equatable {
     case coolingDown
     /// Too many failed attempts for this boundary; give up until the next window.
     case attemptsExhausted
+    /// A never-started window was attempted recently. Stands in for the
+    /// `alreadyStarted`/`coolingDown` gates, which need a boundary this case
+    /// doesn't have.
+    case unanchoredCoolingDown
+    /// Too many attempts at a never-started window; wait until it is seen running.
+    case unanchoredAttemptsExhausted
 }
 
 // MARK: - Policy
@@ -68,9 +78,26 @@ public struct CodexAutoStartPolicy: Sendable, Equatable {
     /// can't be retried on every 60-second poll.
     public var retryInterval: TimeInterval
 
-    public init(maxAttemptsPerWindow: Int = 3, retryInterval: TimeInterval = 600) {
+    /// How far the remaining time may fall short of a full window and still count
+    /// as "never started". Only absorbs clock skew and the seconds between the
+    /// server stamping `reset_at` and us reading it — an unanchored window matches
+    /// to the second, so this stays tight.
+    public var unanchoredTolerance: TimeInterval
+    /// Gap between attempts at anchoring a never-started window. Long, because
+    /// such a window has no boundary to enforce exactly-once with: this interval
+    /// and `maxAttemptsPerWindow` are the entire bound on how much it can spend.
+    public var unanchoredRetryInterval: TimeInterval
+
+    public init(
+        maxAttemptsPerWindow: Int = 3,
+        retryInterval: TimeInterval = 600,
+        unanchoredTolerance: TimeInterval = 120,
+        unanchoredRetryInterval: TimeInterval = 1800
+    ) {
         self.maxAttemptsPerWindow = maxAttemptsPerWindow
         self.retryInterval = retryInterval
+        self.unanchoredTolerance = unanchoredTolerance
+        self.unanchoredRetryInterval = unanchoredRetryInterval
     }
 
     public static let `default` = CodexAutoStartPolicy()
@@ -100,29 +127,65 @@ public struct CodexAutoStartPolicy: Sendable, Equatable {
         guard !needsReauth else { return .skip(.needsReauth) }
         guard fetchSucceeded else { return .skip(.fetchFailed) }
 
-        guard let boundary = expiredBoundary(reported: reported, cached: cached, now: now) else {
-            // Distinguish "the window is alive" from "we have no idea", purely so
-            // the reason is honest in logs; both mean: do nothing.
-            if reported?.weekly?.resetsAt != nil { return .skip(.windowRunning) }
-            return .skip(.noWindow)
-        }
+        if let boundary = expiredBoundary(reported: reported, cached: cached, now: now) {
+            guard let state else { return .start(boundary: boundary) }
 
-        guard let state else { return .start(boundary: boundary) }
-
-        // The exactly-once gate: this boundary was already anchored.
-        if let started = state.startedBoundary, started == boundary {
-            return .skip(.alreadyStarted)
-        }
-
-        // Failure bookkeeping applies only to the boundary being attempted; a new
-        // window starts with a clean slate.
-        if let attempted = state.attemptBoundary, attempted == boundary {
-            if state.attemptCount >= maxAttemptsPerWindow { return .skip(.attemptsExhausted) }
-            if let last = state.lastAttemptAt, now.timeIntervalSince(last) < retryInterval {
-                return .skip(.coolingDown)
+            // The exactly-once gate: this boundary was already anchored.
+            if let started = state.startedBoundary, started == boundary {
+                return .skip(.alreadyStarted)
             }
+
+            // Failure bookkeeping applies only to the boundary being attempted; a
+            // new window starts with a clean slate.
+            if let attempted = state.attemptBoundary, attempted == boundary {
+                if state.attemptCount >= maxAttemptsPerWindow { return .skip(.attemptsExhausted) }
+                if let last = state.lastAttemptAt, now.timeIntervalSince(last) < retryInterval {
+                    return .skip(.coolingDown)
+                }
+            }
+            return .start(boundary: boundary)
         }
-        return .start(boundary: boundary)
+
+        // A window that has never been started needs anchoring just as much as an
+        // expired one — and it is the case that actually bites on the accounts the
+        // user doesn't type into, which sit at 0% forever.
+        if let window = reported?.weekly, isUnanchored(window, now: now) {
+            guard let state else { return .startUnanchored }
+            if state.unanchoredAttemptCount >= maxAttemptsPerWindow {
+                return .skip(.unanchoredAttemptsExhausted)
+            }
+            if let last = state.unanchoredLastAttemptAt,
+               now.timeIntervalSince(last) < unanchoredRetryInterval {
+                return .skip(.unanchoredCoolingDown)
+            }
+            return .startUnanchored
+        }
+
+        // Distinguish "the window is alive" from "we have no idea", purely so the
+        // reason is honest in logs; both mean: do nothing. `.windowRunning` is also
+        // the signal the caller clears the unanchored counters on.
+        if reported?.weekly?.resetsAt != nil { return .skip(.windowRunning) }
+        return .skip(.noWindow)
+    }
+
+    /// True when the server is describing a window no request has ever started.
+    ///
+    /// Rolling windows anchor on the first request, so until one lands the server
+    /// has nothing to anchor to and simply projects: zero usage, and a `reset_at`
+    /// exactly one full window ahead of *now* — a value that slides forward on
+    /// every poll rather than staying put. Verified against the live API: an
+    /// anchored week reports `remaining / window ≈ 0.94`, an unanchored one
+    /// reports exactly `1.0000`.
+    ///
+    /// Such a window never satisfies `expiredBoundary` (its reset is always in the
+    /// future), which is why it used to be mistaken for a healthy running window
+    /// and left un-anchored indefinitely.
+    func isUnanchored(_ window: CodexRateWindow, now: Date) -> Bool {
+        guard window.duration > 0, window.usedPercent <= 0, let resetsAt = window.resetsAt else {
+            return false
+        }
+        let remaining = resetsAt.timeIntervalSince(now)
+        return remaining > 0 && remaining >= window.duration - unanchoredTolerance
     }
 
     /// The `resets_at` of a weekly window that has run out and not been replaced.
@@ -170,6 +233,15 @@ public struct CodexAutoStartState: Codable, Sendable, Equatable {
         public var lastAttemptAt: Date?
         public var lastError: String?
 
+        /// Attempts at anchoring a window that had never been started. Kept apart
+        /// from the boundary counters above because such a window has NO stable
+        /// identity — its projected `resets_at` moves with every poll, so there is
+        /// nothing to key "exactly once" on. A bounded count plus a long cooldown
+        /// stands in for that key, and both are cleared the moment the window is
+        /// observed actually running.
+        public var unanchoredAttemptCount: Int
+        public var unanchoredLastAttemptAt: Date?
+
         public init(
             startedBoundary: Date? = nil,
             startedAt: Date? = nil,
@@ -177,7 +249,9 @@ public struct CodexAutoStartState: Codable, Sendable, Equatable {
             attemptBoundary: Date? = nil,
             attemptCount: Int = 0,
             lastAttemptAt: Date? = nil,
-            lastError: String? = nil
+            lastError: String? = nil,
+            unanchoredAttemptCount: Int = 0,
+            unanchoredLastAttemptAt: Date? = nil
         ) {
             self.startedBoundary = startedBoundary
             self.startedAt = startedAt
@@ -186,6 +260,26 @@ public struct CodexAutoStartState: Codable, Sendable, Equatable {
             self.attemptCount = attemptCount
             self.lastAttemptAt = lastAttemptAt
             self.lastError = lastError
+            self.unanchoredAttemptCount = unanchoredAttemptCount
+            self.unanchoredLastAttemptAt = unanchoredLastAttemptAt
+        }
+
+        /// Decoded field by field so a state file written by an older build — one
+        /// with no unanchored counters in it — still loads instead of resetting
+        /// everyone's "already started" record.
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            startedBoundary = try container.decodeIfPresent(Date.self, forKey: .startedBoundary)
+            startedAt = try container.decodeIfPresent(Date.self, forKey: .startedAt)
+            startedModel = try container.decodeIfPresent(String.self, forKey: .startedModel)
+            attemptBoundary = try container.decodeIfPresent(Date.self, forKey: .attemptBoundary)
+            attemptCount = try container.decodeIfPresent(Int.self, forKey: .attemptCount) ?? 0
+            lastAttemptAt = try container.decodeIfPresent(Date.self, forKey: .lastAttemptAt)
+            lastError = try container.decodeIfPresent(String.self, forKey: .lastError)
+            unanchoredAttemptCount =
+                try container.decodeIfPresent(Int.self, forKey: .unanchoredAttemptCount) ?? 0
+            unanchoredLastAttemptAt =
+                try container.decodeIfPresent(Date.self, forKey: .unanchoredLastAttemptAt)
         }
     }
 
@@ -230,6 +324,48 @@ public struct CodexAutoStartState: Codable, Sendable, Equatable {
         entry.lastAttemptAt = now
         entry.lastError = error
         entries[accountId] = entry
+    }
+
+    // MARK: - Recording (never-started window)
+
+    /// The boundary-less counterparts of the three methods above. `startedBoundary`
+    /// is deliberately left alone: there is no boundary this start retires, only a
+    /// count and a timestamp keeping it from repeating.
+    public mutating func recordUnanchoredAttempt(accountId: String, now: Date) {
+        var entry = entries[accountId] ?? Entry()
+        entry.unanchoredAttemptCount += 1
+        entry.unanchoredLastAttemptAt = now
+        entries[accountId] = entry
+    }
+
+    public mutating func recordUnanchoredSuccess(accountId: String, now: Date, model: String?) {
+        var entry = entries[accountId] ?? Entry()
+        entry.startedAt = now
+        entry.startedModel = model
+        entry.lastError = nil
+        entries[accountId] = entry
+    }
+
+    public mutating func recordUnanchoredFailure(accountId: String, now: Date, error: String) {
+        var entry = entries[accountId] ?? Entry()
+        entry.unanchoredLastAttemptAt = now
+        entry.lastError = error
+        entries[accountId] = entry
+    }
+
+    /// Clears the unanchored counters once the window is seen running — proof that
+    /// whatever we sent (or the user's own request) landed. Returns true when
+    /// something actually changed, so the caller only writes the file when needed.
+    @discardableResult
+    public mutating func clearUnanchored(accountId: String) -> Bool {
+        guard var entry = entries[accountId],
+              entry.unanchoredAttemptCount != 0 || entry.unanchoredLastAttemptAt != nil else {
+            return false
+        }
+        entry.unanchoredAttemptCount = 0
+        entry.unanchoredLastAttemptAt = nil
+        entries[accountId] = entry
+        return true
     }
 
     /// Drops entries for accounts that no longer exist.

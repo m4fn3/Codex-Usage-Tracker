@@ -69,8 +69,16 @@ struct CodexAutoStartPolicyTests {
     }
 
     @Test func `a running window is left alone`() {
-        // resets_at in the future ⇒ some request already anchored this window.
-        let decision = decide(reported: usage(weeklyResetsAt: t0.addingTimeInterval(week)))
+        // resets_at in the future AND short of a full window ⇒ some request already
+        // anchored this window. (A reset exactly one full window out is a different
+        // animal entirely — see the never-started tests below.)
+        let decision = decide(reported: usage(weeklyResetsAt: t0.addingTimeInterval(week - 3600)))
+        #expect(decision == .skip(.windowRunning))
+    }
+
+    @Test func `a running window with no usage yet is left alone`() {
+        // 0% but demonstrably anchored: the clock has visibly moved into it.
+        let decision = decide(reported: usage(weeklyResetsAt: t0.addingTimeInterval(week - 600)))
         #expect(decision == .skip(.windowRunning))
     }
 
@@ -106,6 +114,113 @@ struct CodexAutoStartPolicyTests {
         // No reset time ⇒ no proof it lapsed, and no key to make "once" mean
         // anything.
         #expect(decide(reported: usage(weeklyResetsAt: nil)) == .skip(.noWindow))
+    }
+
+    // MARK: - Windows that were never started
+
+    // The bug this covers, seen live: an account the user never types into sits at
+    // 0% with `reset_at` exactly one full window ahead of *now* — a projection that
+    // slides forward on every poll because no request has anchored it. Its reset is
+    // always in the future, so it used to be filed under "running" and left alone
+    // forever, which is precisely the drift the auto-start exists to prevent.
+
+    @Test func `a window that has never been started is anchored`() {
+        let decision = decide(reported: usage(weeklyResetsAt: t0.addingTimeInterval(week)))
+        #expect(decision == .startUnanchored)
+    }
+
+    @Test func `a reset time a hair under a full window still counts as never started`() {
+        // The seconds between the server stamping reset_at and us reading it.
+        let decision = decide(reported: usage(weeklyResetsAt: t0.addingTimeInterval(week - 90)))
+        #expect(decision == .startUnanchored)
+    }
+
+    @Test func `a window with usage on it is never treated as unstarted`() {
+        // Anything consumed proves a request anchored it, whatever the reset says.
+        let decision = decide(reported: usage(weeklyResetsAt: t0.addingTimeInterval(week), weeklyUsed: 3))
+        #expect(decision == .skip(.windowRunning))
+    }
+
+    @Test func `a never-started window is not re-sent on the next poll`() {
+        // The killer case: an unanchored window has NO stable boundary to dedupe
+        // on (its reset_at moves every minute), so without the cooldown this would
+        // spend a request every 60 seconds.
+        var state = CodexAutoStartState()
+        state.recordUnanchoredAttempt(accountId: "acct-1", now: t0)
+        state.recordUnanchoredSuccess(accountId: "acct-1", now: t0, model: "gpt-5.6-luna")
+
+        for minute in 1...20 {
+            let now = t0.addingTimeInterval(Double(minute) * 60)
+            // The server keeps projecting from `now` until the send registers.
+            let decision = decide(
+                reported: usage(weeklyResetsAt: now.addingTimeInterval(week)),
+                state: state.entry(for: "acct-1"),
+                now: now
+            )
+            #expect(decision == .skip(.unanchoredCoolingDown))
+        }
+    }
+
+    @Test func `attempts at a never-started window are capped`() {
+        let policy = CodexAutoStartPolicy.default
+        var state = CodexAutoStartState()
+        var now = t0
+
+        for attempt in 1...policy.maxAttemptsPerWindow {
+            #expect(decide(policy: policy,
+                           reported: usage(weeklyResetsAt: now.addingTimeInterval(week)),
+                           state: state.entry(for: "acct-1"), now: now) == .startUnanchored)
+            state.recordUnanchoredAttempt(accountId: "acct-1", now: now)
+            state.recordUnanchoredFailure(accountId: "acct-1", now: now, error: "boom \(attempt)")
+            now = now.addingTimeInterval(policy.unanchoredRetryInterval + 1)
+        }
+
+        #expect(decide(policy: policy,
+                       reported: usage(weeklyResetsAt: now.addingTimeInterval(week)),
+                       state: state.entry(for: "acct-1"), now: now) == .skip(.unanchoredAttemptsExhausted))
+    }
+
+    @Test func `seeing the window run gives the next unstarted spell a fresh budget`() {
+        // Once the window is observed running, the earlier send demonstrably landed
+        // — clearUnanchored() is what the caller does on .windowRunning.
+        var state = CodexAutoStartState()
+        for _ in 1...CodexAutoStartPolicy.default.maxAttemptsPerWindow {
+            state.recordUnanchoredAttempt(accountId: "acct-1", now: t0)
+        }
+        let cleared = state.clearUnanchored(accountId: "acct-1")
+        #expect(cleared)
+        #expect(state.entry(for: "acct-1")?.unanchoredAttemptCount == 0)
+
+        #expect(decide(reported: usage(weeklyResetsAt: t0.addingTimeInterval(week)),
+                       state: state.entry(for: "acct-1")) == .startUnanchored)
+        // …and it is a no-op the second time, so the file is not rewritten on every poll.
+        let clearedAgain = state.clearUnanchored(accountId: "acct-1")
+        #expect(!clearedAgain)
+    }
+
+    @Test func `an expired window wins over the never-started check`() {
+        // Both could describe the same snapshot in principle; the expired branch has
+        // a real boundary to dedupe on, so it must be the one that fires.
+        let boundary = t0.addingTimeInterval(-60)
+        #expect(decide(reported: usage(weeklyResetsAt: boundary)) == .start(boundary: boundary))
+    }
+
+    @Test func `the unstarted check respects the disabled and reauth guards`() {
+        let running = usage(weeklyResetsAt: t0.addingTimeInterval(week))
+        #expect(decide(enabled: false, reported: running) == .skip(.disabled))
+        #expect(decide(needsReauth: true, reported: running) == .skip(.needsReauth))
+        #expect(decide(fetchSucceeded: false, reported: running) == .skip(.fetchFailed))
+    }
+
+    @Test func `an older state file loads with empty unstarted counters`() throws {
+        // Written by a build that predates the never-started handling.
+        let json = """
+        {"entries":{"acct-1":{"attemptCount":2,"startedModel":"gpt-5.6-luna"}}}
+        """
+        let state = try JSONDecoder().decode(CodexAutoStartState.self, from: Data(json.utf8))
+        #expect(state.entry(for: "acct-1")?.attemptCount == 2)
+        #expect(state.entry(for: "acct-1")?.unanchoredAttemptCount == 0)
+        #expect(state.entry(for: "acct-1")?.unanchoredLastAttemptAt == nil)
     }
 
     // MARK: - Guards

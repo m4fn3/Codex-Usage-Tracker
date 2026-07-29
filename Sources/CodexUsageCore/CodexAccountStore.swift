@@ -41,6 +41,12 @@ public struct CodexAccountStore: Codable, Sendable, Equatable {
         accounts.first { $0.id == id }
     }
 
+    /// The accounts in the fixed order the menu bar draws them in.
+    /// See `CodexAccount.presentationOrder` for why it ignores the active account.
+    public var inPresentationOrder: [CodexAccount] {
+        accounts.sorted(by: CodexAccount.presentationOrder)
+    }
+
     // MARK: - Persistence
 
     public static var storeURL: URL {
